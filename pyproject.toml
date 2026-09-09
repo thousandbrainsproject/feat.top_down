@@ -128,8 +128,8 @@ print_version_tool = [
 [project.urls]
 Homepage = 'https://thousandbrainsproject.org'
 Documentation = 'https://docs.thousandbrains.org/docs'
-Repository = 'https://github.com/thousandbrainsproject.tbp.monty'
-Issues = 'https://github.com/thousandbrainsproject/tbp.monty/issues'
+Repository = 'https://github.com/thousandbrainsproject.feat.top_down'
+Issues = 'https://github.com/thousandbrainsproject/feat.top_down/issues'
 
 [tool.deptry]
 exclude = ['venv', '\.venv', '\.direnv', '\.git', 'setup\.py']
