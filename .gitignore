@@ -144,3 +144,6 @@ outputs/
 
 # MuJoCo
 MUJOCO_LOG.TXT
+
+# LLMs
+/.claude/
