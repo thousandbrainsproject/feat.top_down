@@ -138,6 +138,17 @@ class HierarchyTest(unittest.TestCase):
             "models in LM1 should store input from LM0 in episode 2 "
             f"after extending the graph but only store {channel_keys}",
         )
+        # LM1 stores where on its own model LM0 was, which is the association
+        # LM1 reads back when it sends top-down input to LM0.
+        feature_mapping = models["2"]["LM_1"]["new_object0"][
+            "learning_module_0"
+        ].feature_mapping
+        self.assertIn(
+            "location_rel_model",
+            feature_mapping,
+            "models in LM1 should store LM0's location rel. model but only store "
+            f"{feature_mapping.keys()}",
+        )
 
     def test_two_lm_heterarchy_experiment(self) -> None:
         """Test two LMs stacked on top of each other.
