@@ -290,6 +290,25 @@ class EvidenceLMTest(BaseGraphTest):
             "Should recognize rotation 0, 0, 0.",
         )
 
+    def test_output_carries_mlh_location_rel_model(self):
+        fake_obs_test = copy.deepcopy(self.fake_obs_learn)
+
+        graph_lm = self.get_elm_with_fake_object(self.fake_obs_learn)
+        graph_lm.mode = ExperimentMode.EVAL
+        graph_lm.reset_stm()
+        graph_lm.fixme_reset_ground_truth(primary_target=self.placeholder_target)
+        for observation in fake_obs_test:
+            graph_lm.add_lm_processing_to_buffer_stats(lm_processed=True)
+            graph_lm.matching_step(self.ctx, [observation])
+
+        output = graph_lm.get_output()
+
+        np.testing.assert_array_equal(
+            output.non_morphological_features["location_rel_model"],
+            graph_lm._get_current_mlh()["location"],
+            err_msg="location_rel_model should be the MLH location.",
+        )
+
     def test_location_only_step_displaces_hypotheses_elm(self):
         """A location-only step displaces hypotheses without updating evidence.
 

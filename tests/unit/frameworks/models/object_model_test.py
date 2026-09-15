@@ -8,10 +8,16 @@
 # license that can be found in the LICENSE file or at
 # https://opensource.org/licenses/MIT.
 
+from __future__ import annotations
+
 import copy
 import unittest
 
 import numpy as np
+import numpy.typing as npt
+from hypothesis import given
+from hypothesis import strategies as st
+from hypothesis.extra.numpy import arrays
 
 from tbp.monty.frameworks.models.object_model import (
     GraphObjectModel,
@@ -20,6 +26,7 @@ from tbp.monty.frameworks.models.object_model import (
 )
 from tbp.monty.frameworks.utils.spatial_arithmetics import check_orthonormal
 from tbp.monty.geometry import Rotation
+from tbp.monty.math import DEFAULT_TOLERANCE
 
 
 class ObjectModelTest(unittest.TestCase):
@@ -314,4 +321,50 @@ class ObjectModelTest(unittest.TestCase):
             model.build_model(
                 self.dummy_locs,
                 self.dummy_features,
+            )
+
+
+class GridObjectModelLMFeaturesTest(unittest.TestCase):
+    """Features that a learning module sender stores in a parent model."""
+
+    LOCATIONS = np.array([[0, 0, 0], [0, 1, 0], [1, 0, 0], [1, 1, 0]], dtype=np.float64)
+    """One observation per voxel, so no two rows are averaged together."""
+
+    @given(
+        locations_rel_model=arrays(
+            dtype=np.float64,
+            shape=(4, 3),
+            elements=st.floats(min_value=-1.0, max_value=1.0, allow_nan=False),
+        )
+    )
+    def test_location_feature_is_stored_per_node(
+        self, locations_rel_model: npt.NDArray[np.float64]
+    ) -> None:
+        model = GridObjectModel(
+            "test_model", max_nodes=10, max_size=10, num_voxels_per_dim=10
+        )
+        model.build_model(
+            self.LOCATIONS,
+            {
+                "pose_vectors": np.tile(np.eye(3).flatten(), (len(self.LOCATIONS), 1)),
+                "pose_fully_defined": np.ones(len(self.LOCATIONS), dtype=bool),
+                "location_rel_model": locations_rel_model,
+            },
+        )
+
+        start, stop = model.feature_mapping["location_rel_model"]
+        self.assertEqual(
+            stop - start,
+            3,
+            "location_rel_model should occupy three columns of the feature array.",
+        )
+        for location, location_rel_model in zip(self.LOCATIONS, locations_rel_model):
+            node_id = int(np.argmin(np.linalg.norm(model.pos - location, axis=1)))
+            np.testing.assert_allclose(
+                model.x[node_id, start:stop],
+                location_rel_model,
+                rtol=0,
+                atol=DEFAULT_TOLERANCE,
+                err_msg=f"location_rel_model observed at {location} should be "
+                "stored at the node built from that location.",
             )
