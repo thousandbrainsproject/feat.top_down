@@ -23,7 +23,7 @@ __all__ = ["FakeLearningModule"]
 class FakeLearningModule(LearningModule):
     """Dummy placeholder class used only for tests."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.test_attr_1 = True
         self.test_attr_2 = True
 
@@ -42,6 +42,15 @@ class FakeLearningModule(LearningModule):
         pass
 
     def send_out_vote(self) -> Any:
+        pass
+
+    def has_input_channel(self, channel_id: str) -> bool:  # noqa: ARG002
+        return False
+
+    def send_top_down(self, receiver_id: str) -> list[Message]:  # noqa: ARG002
+        return []
+
+    def receive_top_down(self, messages: Sequence[Message]) -> None:
         pass
 
     def state_dict(self) -> Memento:
