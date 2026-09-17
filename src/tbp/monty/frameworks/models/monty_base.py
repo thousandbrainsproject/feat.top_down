@@ -28,6 +28,7 @@ from tbp.monty.frameworks.models.abstract_monty_classes import (
     RuntimeContext,
     SensorModule,
 )
+from tbp.monty.frameworks.models.connectivity import Connection, Connectivity
 from tbp.monty.frameworks.models.motor_system import MotorSystem
 from tbp.monty.frameworks.models.motor_system_state import ProprioceptiveState
 from tbp.monty.memento import Memento
@@ -38,6 +39,9 @@ logger = logging.getLogger(__name__)
 
 
 class MontyBase(Monty):
+    _connectivity: Connectivity
+    """The senders to each learning module, classified by connection."""
+
     _is_done: bool
 
     def __init__(
@@ -72,9 +76,13 @@ class MontyBase(Monty):
                 that learning module i receives input from. For now, assume 1:1 mapping.
                 Technically, this is a coupling matrix, but since it is sparse, the
                 argument format is an array of arrays.
-            lm_to_lm_matrix: just like sm_to_lm_matrix, but describes coupling
-                between learning modules where one lms output becomes another lms input.
-                The output of an lm needs to be the same format as its input.
+            lm_to_lm_matrix: `lm_to_lm_matrix[i]` lists the learning modules whose
+                output learning module i receives. `Connectivity` classifies each
+                of those edges as a bottom-up or a top-down `Connection`. With two
+                stacked learning modules, where LM1 models LM0 as an input
+                channel, `[[], [0]]` sends LM0 output up to LM1 as a percept,
+                and `[[1], [0]]` additionally sends LM1 output down to LM0 as
+                top-down input.
             lm_to_lm_vote_matrix: describes lateral coupling between learning
                 modules. This matrix is used for voting. Assumes no lateral voting if
                 `None` is passed.
@@ -87,6 +95,8 @@ class MontyBase(Monty):
         Raises:
             ValueError: If `sm_to_lm_matrix` is not defined
             ValueError: If the lengths of `learning_modules` and `sm_to_lm_matrix`
+                do not match
+            ValueError: If the lengths of `learning_modules` and `lm_to_lm_matrix`
                 do not match
             ValueError: If the keys of `sm_to_agent_dict` do not match the
                 `sensor_module_id`s of `sensor_modules`
@@ -126,6 +136,8 @@ class MontyBase(Monty):
             raise ValueError(
                 "The lengths of learning_modules and sm_to_lm_matrix must match"
             )
+
+        self._connectivity = Connectivity(lm_to_lm_matrix, learning_modules)
 
         if self.lm_to_lm_vote_matrix is not None and lm_len != len(
             self.lm_to_lm_vote_matrix
@@ -235,7 +247,7 @@ class MontyBase(Monty):
             getattr(self.learning_modules[i], self.step_type)(ctx, sensory_inputs)
 
     def _collect_inputs_to_lm(self, lm_id: int) -> list[Message]:
-        """Use sm_to_lm_matrix and lm_to_lm_matrix to collect inputs to LM i.
+        """Collect the percepts to LM i from its sensor modules and learning modules.
 
         Args:
             lm_id: Index of receiving LM to collect inputs to.
@@ -246,12 +258,10 @@ class MontyBase(Monty):
         sensory_inputs_from_sms = [
             self.sensor_module_outputs[j] for j in self.sm_to_lm_matrix[lm_id]
         ]
-        if self.lm_to_lm_matrix is not None:
-            sensory_inputs_from_lms = [
-                self.learning_module_outputs[j] for j in self.lm_to_lm_matrix[lm_id]
-            ]
-        else:
-            sensory_inputs_from_lms = []
+        sensory_inputs_from_lms = [
+            self.learning_module_outputs[j]
+            for j in self._connectivity.senders_to(lm_id, Connection.BOTTOM_UP)
+        ]
         # Combine sensory inputs from SMs and LMs to LM i
         return self._combine_inputs(sensory_inputs_from_sms, sensory_inputs_from_lms)
 
@@ -302,6 +312,22 @@ class MontyBase(Monty):
             for i in range(len(self.learning_modules)):
                 voting_data = [votes_per_lm[j] for j in self.lm_to_lm_vote_matrix[i]]
                 self.learning_modules[i].receive_votes(voting_data)
+
+    def _pass_top_down(self) -> None:
+        # Send out top-down input
+        top_down_input_per_lm = []
+        for i in range(len(self.learning_modules)):
+            receiver_id = self.learning_modules[i].learning_module_id
+            top_down_input = []
+            for j in self._connectivity.senders_to(i, Connection.TOP_DOWN):
+                top_down_input.extend(
+                    self.learning_modules[j].send_top_down(receiver_id)
+                )
+            top_down_input_per_lm.append(top_down_input)
+        # Receive top-down input
+        for i in range(len(self.learning_modules)):
+            if top_down_input_per_lm[i]:
+                self.learning_modules[i].receive_top_down(top_down_input_per_lm[i])
 
     def _pass_goals(self) -> None:
         """Pass goals between learning modules.

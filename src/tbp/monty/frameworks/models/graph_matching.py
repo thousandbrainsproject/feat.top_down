@@ -667,6 +667,23 @@ class GraphLM(LearningModule):
                     self.possible_matches.pop(vote)
             self._add_votes_to_buffer_stats(votes)
 
+    def has_input_channel(self, channel_id: str) -> bool:
+        return channel_id in self.tolerances
+
+    def send_top_down(self, receiver_id: str) -> list[Message]:  # noqa: ARG002
+        """Does not send top-down messages.
+
+        Predicting a receiver's output needs evidence-scored hypotheses, which graph
+        matching alone does not maintain.
+
+        Returns:
+            An empty list.
+        """
+        return []
+
+    def receive_top_down(self, messages: Sequence[Message]) -> None:
+        """No evidence-scored hypotheses to bias."""
+
     def get_output(self) -> Message | None:
         """Return the output of the learning module.
 
