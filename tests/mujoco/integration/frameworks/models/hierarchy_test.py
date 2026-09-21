@@ -138,6 +138,19 @@ class HierarchyTest(unittest.TestCase):
             "models in LM1 should store input from LM0 in episode 2 "
             f"after extending the graph but only store {channel_keys}",
         )
+        # LM1 stores a set of features at a location in its own reference frame.
+        # One of these features is itself a pointer to the location in LM0 that
+        # was active when LM0 passed information (including information such as
+        # object ID) to LM1.
+        feature_mapping = models["2"]["LM_1"]["new_object0"][
+            "learning_module_0"
+        ].feature_mapping
+        self.assertIn(
+            "location_rel_model",
+            feature_mapping,
+            "models in LM1 should store LM0's location rel. model but only store "
+            f"{feature_mapping.keys()}",
+        )
 
     def test_two_lm_heterarchy_experiment(self) -> None:
         """Test two LMs stacked on top of each other.

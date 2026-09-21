@@ -564,9 +564,9 @@ class EvidenceGraphLM(GraphLM):
             },
             non_morphological_features={
                 "object_id": object_id_features,
-                # TODO H: test if it makes sense to communicate mlh["location"] as a
-                # non-morphological feature as well (would be kind of like the inverse
-                # of top-down connections).
+                # The receiving LM stores this at its own graph nodes. It is the
+                # association that top-down connections send back.
+                "location_rel_model": np.array(mlh["location"], dtype=np.float64),
             },
             confidence=confidence,
             pass_message=pass_message,
