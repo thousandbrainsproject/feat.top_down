@@ -12,16 +12,96 @@ from __future__ import annotations
 import copy
 
 import numpy as np
+from hypothesis import given, settings
+from hypothesis import strategies as st
+from hypothesis.extra.numpy import arrays
 from omegaconf import OmegaConf
 
 from tbp.monty.cmp import Message
+from tbp.monty.context import RuntimeContext
 from tbp.monty.frameworks.experiments.mode import ExperimentMode
 from tbp.monty.frameworks.models.evidence_matching.learning_module import (
     EvidenceGraphLM,
 )
 from tbp.monty.frameworks.models.goal_generation import EvidenceGoalGenerator
+from tbp.monty.frameworks.models.object_model import GridObjectModel
+from tbp.monty.frameworks.utils.spatial_arithmetics import (
+    apply_rf_transform_to_points,
+)
+from tbp.monty.geometry import Rotation
+from tbp.monty.math import DEFAULT_TOLERANCE
 from tests import HYDRA_ROOT
 from tests.unit.resources.unit_test_utils import BaseGraphTest
+
+
+@st.composite
+def rotations(draw) -> Rotation:
+    """Strategy for rotations, over the full range of Euler angles.
+
+    Returns:
+        A rotation.
+    """
+    return Rotation.from_euler(
+        "xyz",
+        draw(
+            arrays(
+                dtype=np.float64,
+                shape=3,
+                elements=st.floats(min_value=-180, max_value=180),
+            )
+        ),
+        degrees=True,
+    )
+
+
+def elm_with_fake_object(
+    ctx: RuntimeContext,
+    fake_obs: list[Message],
+    initial_possible_poses: str = "informed",
+    gsg: EvidenceGoalGenerator | None = None,
+) -> EvidenceGraphLM:
+    """Learn one object from fake observations.
+
+    Args:
+        ctx: Runtime context to step the learning module with.
+        fake_obs: Observations to explore, one per step.
+        initial_possible_poses: How the hypotheses updater seeds its poses.
+        gsg: Goal state generator, or None for a learning module without one.
+
+    Returns:
+        A learning module holding `new_object0` in memory.
+    """
+    graph_lm = EvidenceGraphLM(
+        max_match_distance=0.005,
+        tolerances={
+            "patch": {
+                "hsv": [0.1, 1, 1],
+                "principal_curvatures_log": [1, 1],
+            }
+        },
+        feature_weights={
+            "patch": {
+                "hsv": np.array([1, 0, 0]),
+            }
+        },
+        # set graph size larger since fake obs displacements are meters
+        max_graph_size=10,
+        gsg=gsg,
+        hypotheses_updater_args=dict(
+            initial_possible_poses=initial_possible_poses,
+        ),
+    )
+    graph_lm.mode = ExperimentMode.TRAIN
+    for observation in fake_obs:
+        graph_lm.exploratory_step(ctx, [observation])
+    graph_lm.detected_object = "new_object0"
+    graph_lm.detected_rotation_r = None
+    graph_lm.buffer.stats["detected_location_rel_body"] = (
+        graph_lm.buffer.current_location()
+    )
+    graph_lm.update_ltm_from_stm()
+    graph_lm.fixme_update_ground_truth()
+    return graph_lm
 
 
 class EvidenceLMTest(BaseGraphTest):
@@ -81,42 +161,13 @@ class EvidenceLMTest(BaseGraphTest):
     def get_elm_with_fake_object(
         self, fake_obs, initial_possible_poses="informed", gsg=None
     ):
-        graph_lm = EvidenceGraphLM(
-            max_match_distance=0.005,
-            tolerances={
-                "patch": {
-                    "hsv": [0.1, 1, 1],
-                    "principal_curvatures_log": [1, 1],
-                }
-            },
-            feature_weights={
-                "patch": {
-                    "hsv": np.array([1, 0, 0]),
-                }
-            },
-            # set graph size larger since fake obs displacements are meters
-            max_graph_size=10,
-            gsg=gsg,
-            hypotheses_updater_args=dict(
-                initial_possible_poses=initial_possible_poses,
-            ),
-        )
-        graph_lm.mode = ExperimentMode.TRAIN
-        for observation in fake_obs:
-            graph_lm.exploratory_step(self.ctx, [observation])
-        graph_lm.detected_object = "new_object0"
-        graph_lm.detected_rotation_r = None
-        graph_lm.buffer.stats["detected_location_rel_body"] = (
-            graph_lm.buffer.current_location()
-        )
+        graph_lm = elm_with_fake_object(self.ctx, fake_obs, initial_possible_poses, gsg)
 
         self.assertEqual(
             len(graph_lm.buffer.get_all_locations_on_object()),
             len(fake_obs),
             f"Should have stored exactly {fake_obs} locations in the buffer.",
         )
-        graph_lm.update_ltm_from_stm()
-        graph_lm.fixme_update_ground_truth()
         self.assertEqual(
             len(graph_lm.get_all_known_object_ids()),
             1,
@@ -812,4 +863,128 @@ class EvidenceLMTest(BaseGraphTest):
             list(graph_lm._get_current_mlh()["rotation"].as_euler("xyz", degrees=True)),
             [0, 0, 0],
             "Should recognize rotation 0, 0, 0.",
+        )
+
+
+class EvidenceLMTopDownTest(BaseGraphTest):
+    LEARNED_GRAPH_ID = "new_object0"
+    CHILD_CHANNEL = "learning_module_0"
+    CHILD_OBJECT_ID = 100
+    SENDING_EVIDENCE = 2.0
+    UNROTATED = Rotation.identity()
+
+    def elm_ready_to_send_top_down(
+        self,
+        child_pose: Rotation,
+        detected_pose: Rotation,
+        channel_offset: float = 0.0,
+    ) -> EvidenceGraphLM:
+        """Recognize the fake object and attach a child channel graph to it.
+
+        Args:
+            child_pose: Pose the child reported at every node.
+            detected_pose: Pose the parent detected while it learned the channel
+                graph, which the stored child poses are relative to.
+            channel_offset: Distance to shift the channel graph nodes away from the
+                patch graph nodes by, along every axis.
+
+        Returns:
+            The learning module, in a "match" terminal state.
+        """
+        graph_lm = elm_with_fake_object(self.ctx, copy.deepcopy(self.fake_obs_learn))
+        graph_lm.mode = ExperimentMode.EVAL
+        graph_lm.reset_stm()
+        graph_lm.fixme_reset_ground_truth(primary_target=self.placeholder_target)
+        for observation in copy.deepcopy(self.fake_obs_learn):
+            graph_lm.add_lm_processing_to_buffer_stats(lm_processed=True)
+            graph_lm.matching_step(self.ctx, [observation])
+        channel_model = GridObjectModel(
+            self.LEARNED_GRAPH_ID,
+            max_nodes=graph_lm.graph_memory.max_nodes_per_graph,
+            max_size=graph_lm.graph_memory.max_graph_size,
+            num_voxels_per_dim=graph_lm.graph_memory.num_model_voxels_per_dim,
+        )
+
+        node_locations = graph_lm.graph_memory.get_graph(
+            self.LEARNED_GRAPH_ID, "patch"
+        ).pos
+        num_nodes = len(node_locations)
+        _, stored = apply_rf_transform_to_points(
+            locations=np.zeros((1, 3)),
+            features={"pose_vectors": child_pose.as_matrix().reshape(1, 9)},
+            location_rel_model=np.zeros(3),
+            object_location_rel_body=np.zeros(3),
+            object_rotation=detected_pose.inv(),
+        )
+        channel_model.build_model(
+            node_locations + channel_offset,
+            {
+                "pose_vectors": np.tile(stored["pose_vectors"], (num_nodes, 1)),
+                "pose_fully_defined": np.ones(num_nodes, dtype=bool),
+                "object_id": np.full(num_nodes, self.CHILD_OBJECT_ID, dtype=np.float64),
+                "location_rel_model": node_locations,
+            },
+        )
+
+        graph_lm.graph_memory.models_in_memory[self.LEARNED_GRAPH_ID][
+            self.CHILD_CHANNEL
+        ] = channel_model
+
+        graph_lm.terminal_state = "match"
+        return graph_lm
+
+    def test_top_down_input_is_not_sent_until_the_object_is_recognized(self) -> None:
+        graph_lm = self.elm_ready_to_send_top_down(self.UNROTATED, self.UNROTATED)
+        graph_lm.terminal_state = None
+
+        self.assertEqual(
+            graph_lm.send_top_down(self.CHILD_CHANNEL),
+            [],
+            "Should not send top-down messages before reaching a match.",
+        )
+
+    def test_top_down_input_is_empty_for_a_receiver_that_is_not_an_input_channel(
+        self,
+    ) -> None:
+        graph_lm = self.elm_ready_to_send_top_down(self.UNROTATED, self.UNROTATED)
+
+        self.assertEqual(
+            graph_lm.send_top_down("Not_input_channel"),
+            [],
+            "Should not send top-down messages for an LM it does not model.",
+        )
+
+    def test_top_down_input_skips_hypotheses_farther_than_max_match_distance(
+        self,
+    ) -> None:
+        graph_lm = self.elm_ready_to_send_top_down(
+            self.UNROTATED, self.UNROTATED, channel_offset=0.1
+        )
+
+        self.assertEqual(
+            graph_lm.send_top_down(self.CHILD_CHANNEL),
+            [],
+            "A hypothesis with no node within max_match_distance has no stored "
+            "association to send.",
+        )
+
+    @settings(deadline=1000)
+    @given(child_pose=rotations(), detected_pose=rotations())
+    def test_top_down_pose_is_the_one_the_child_sent_up(
+        self, child_pose: Rotation, detected_pose: Rotation
+    ) -> None:
+        graph_lm = self.elm_ready_to_send_top_down(child_pose, detected_pose)
+        hypotheses = graph_lm._hypotheses[self.LEARNED_GRAPH_ID]
+        hypotheses.poses[int(np.argmax(hypotheses.evidence))] = (
+            detected_pose.as_matrix()
+        )
+
+        messages = graph_lm.send_top_down(self.CHILD_CHANNEL)
+
+        np.testing.assert_allclose(
+            messages[0].morphological_features["pose_vectors"],
+            child_pose.as_matrix(),
+            rtol=0,
+            atol=DEFAULT_TOLERANCE,
+            err_msg="Pose vectors should be the ones the child sent up.",
         )
