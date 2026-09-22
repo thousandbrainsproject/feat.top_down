@@ -80,6 +80,10 @@ class Connectivity:
                 else:
                     self._senders[Connection.TOP_DOWN][receiver].append(sender)
 
+        # TODO: Reject bottom-up connections that form a cycle of any length, e.g.
+        # LM0 -> LM1 -> LM2 -> LM0. Until then configs must define a valid
+        # heterarchy connectivity
+
     def senders_to(self, receiver: int, connection: Connection) -> Sequence[int]:
         """The learning modules whose outputs reach a receiver over a connection.
 
