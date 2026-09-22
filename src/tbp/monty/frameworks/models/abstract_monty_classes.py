@@ -361,10 +361,12 @@ class RuntimeLearningModule(Protocol):
     def has_input_channel(self, channel_id: str) -> bool:
         """Whether this learning module matches the output of `channel_id`.
 
-        Monty uses this to decide how to deliver an `lm_to_lm_matrix` edge. The
-        output of a sender that the receiving learning module models as an input
-        channel is delivered as a bottom-up percept. The output of any other
-        sender is delivered as top-down input.
+        Monty uses this to decide how to deliver an `lm_to_lm_matrix` edge:
+
+        - Bottom-up: the receiving learning module models the sender as one of
+          its input channels. The sender's output arrives as a percept.
+        - Top-down: the receiving learning module does not model the sender.
+          The sender's output arrives as top-down input.
 
         Args:
             channel_id: ID of the sending module, e.g. "learning_module_0".
