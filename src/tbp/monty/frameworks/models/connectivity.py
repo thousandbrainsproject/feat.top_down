@@ -81,11 +81,11 @@ class Connectivity:
                     self._senders[Connection.TOP_DOWN][receiver].append(sender)
 
     def senders_to(self, receiver: int, connection: Connection) -> Sequence[int]:
-        """The learning modules whose output reaches a receiver over a connection.
+        """The learning modules whose outputs reach a receiver over a connection.
 
         Args:
             receiver: Index of the receiving learning module.
-            connection: How the senders' output reaches the receiver.
+            connection: How the senders' outputs reach the receiver.
 
         Returns:
             Indices of the sending learning modules.
