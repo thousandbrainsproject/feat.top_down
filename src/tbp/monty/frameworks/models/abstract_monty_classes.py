@@ -379,9 +379,9 @@ class RuntimeLearningModule(Protocol):
     def send_top_down(self, receiver_id: str) -> Sequence[Message]:
         """Predict the output expected from a lower-level learning module.
 
-        Each returned Message specifies a location and pose vectors in the
-        reference frame of the receiving learning module's model, an object ID,
-        and a confidence in [0, 1].
+        Each returned Message specifies a location in the reference frame of the
+        receiving learning module's model, an object ID, object pose, and a
+        confidence in [0, 1].
 
         Args:
             receiver_id: ID of the lower-level learning module the prediction is
