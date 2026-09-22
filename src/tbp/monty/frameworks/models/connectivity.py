@@ -34,7 +34,9 @@ class Connectivity:
     but not the connection type, i.e., bottom-up or top-down. The connection type is
     decided by the receiver. If the message's sender is an input channel on the
     receiver's tolerance list, i.e., used for matching, the connection is bottom-up.
-    Otherwise, the connection is classified as top-down.
+    Otherwise, the connection is classified as top-down. This is modeled based on how
+    the hierarchical connections are defined in the cortex, i.e., by the asymmetry
+    of L4 --> L3 vs. L6 --> L1 connections.
 
     Note that this class only models the `lm_to_lm_matrix` and does not include the
     voting connections, i.e., `lm_to_lm_vote_matrix`.
