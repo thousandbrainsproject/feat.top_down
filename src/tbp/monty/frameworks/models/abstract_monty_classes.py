@@ -157,6 +157,7 @@ class Monty(ExperimentMonty, RuntimeMonty, Snapshotable, metaclass=abc.ABCMeta):
         self.aggregate_sensory_inputs(ctx, observations, proprioceptive_state)
         self._step_learning_modules(ctx)
         self._vote()
+        self._pass_top_down()
         self._pass_goals()
         self._step_motor_system(ctx, observations, proprioceptive_state)
         self._set_step_type_and_check_if_done()
@@ -222,6 +223,14 @@ class Monty(ExperimentMonty, RuntimeMonty, Snapshotable, metaclass=abc.ABCMeta):
         """Share information across learning modules.
 
         Use LM.send_out_vote and LM.receive_votes.
+        """
+        pass
+
+    @abc.abstractmethod
+    def _pass_top_down(self) -> None:
+        """Pass top-down input from higher-level to lower-level learning modules.
+
+        Use LM.send_top_down and LM.receive_top_down.
         """
         pass
 
@@ -349,6 +358,49 @@ class RuntimeLearningModule(Protocol):
         """
         ...
 
+    def has_input_channel(self, channel_id: str) -> bool:
+        """Whether this learning module matches the output of `channel_id`.
+
+        Monty uses this to decide how to deliver an `lm_to_lm_matrix` edge:
+
+        - Bottom-up: the receiving learning module models the sender as one of
+          its input channels. The sender's output arrives as a percept.
+        - Top-down: the receiving learning module does not model the sender.
+          The sender's output arrives as top-down input.
+
+        Args:
+            channel_id: ID of the sending module, e.g. "learning_module_0".
+
+        Returns:
+            True if `channel_id` is one of this learning module's input channels.
+        """
+        ...
+
+    def send_top_down(self, receiver_id: str) -> Sequence[Message]:
+        """Predict the output expected from a lower-level learning module.
+
+        Each returned Message specifies a location in the reference frame of the
+        receiving learning module's model, an object ID, object pose, and a
+        confidence in [0, 1].
+
+        Args:
+            receiver_id: ID of the lower-level learning module the prediction is
+                for.
+
+        Returns:
+            Top-down input for `receiver_id`. Empty if this learning module has
+            no prediction to send.
+        """
+        ...
+
+    def receive_top_down(self, messages: Sequence[Message]) -> None:
+        """Bias the hypothesis space with predictions from a higher-level LM.
+
+        Args:
+            messages: Top-down input as aggregated in `send_top_down`.
+        """
+        ...
+
     def propose_goals(self) -> Sequence[Goal]:
         """Return the goals proposed by this LM's GSG if they exist.
 
@@ -415,6 +467,18 @@ class LearningModule(
 
     @abc.abstractmethod
     def send_out_vote(self) -> Any:
+        pass
+
+    @abc.abstractmethod
+    def has_input_channel(self, channel_id: str) -> bool:
+        pass
+
+    @abc.abstractmethod
+    def send_top_down(self, receiver_id: str) -> Sequence[Message]:
+        pass
+
+    @abc.abstractmethod
+    def receive_top_down(self, messages: Sequence[Message]) -> None:
         pass
 
     @abc.abstractmethod
