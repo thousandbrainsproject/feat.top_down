@@ -152,6 +152,9 @@ class EvidenceGraphLM(GraphLM):
         vote_evidence_threshold: Only send votes that have a scaled evidence above
             this threshold. Vote evidences are in the range of [-1, 1] so the threshold
             should not be outside this range.
+        top_down_evidence_threshold: Only send top-down messages from hypotheses whose
+            scaled evidence is above this threshold. Scaled evidences are in the range
+            of [-1, 1] so the threshold should not be outside this range.
         past_weight: How much should the evidence accumulated so far be weighted
             when combined with the evidence from the most recent observation.
         present_weight: How much should the current evidence be weighted when added
@@ -242,6 +245,7 @@ class EvidenceGraphLM(GraphLM):
         feature_evidence_increment=1,
         evidence_threshold_config: float | str = "all",
         vote_evidence_threshold=0.8,
+        top_down_evidence_threshold: float = 0.8,
         past_weight=1,
         present_weight=1,
         vote_weight=1,
@@ -280,6 +284,7 @@ class EvidenceGraphLM(GraphLM):
         self.feature_evidence_increment = feature_evidence_increment
         self.evidence_threshold_config = evidence_threshold_config
         self.vote_evidence_threshold = vote_evidence_threshold
+        self.top_down_evidence_threshold = top_down_evidence_threshold
         # ------ Weighting Params ------
         self.feature_weights = feature_weights
         self.past_weight = past_weight
@@ -525,6 +530,93 @@ class EvidenceGraphLM(GraphLM):
                 "sensed_pose_rel_body": sensed_pose,
             }
         return vote
+
+    def send_top_down(self, receiver_id: str) -> list[Message]:
+        """Create top-down messages to be sent to the receiver LL-LM.
+
+        A higher-level learning module models a lower-level one as an input channel,
+        so each node of that channel graph stores what the lower-level learning module
+        inferred there: the child object's ID, the child's sensor location relative to
+        the child's own reference frame (`location_rel_model`), and the child object's
+        pose. Top-down messages send that information back to the child.
+
+        Every hypothesis of a recognized object whose scaled evidence is above
+        `top_down_evidence_threshold` contributes one message. Hypotheses further
+        than `max_match_distance` from any node of the channel graph are skipped.
+
+        Args:
+            receiver_id: ID of the lower-level learning module the top-down message is
+                for.
+
+        Returns:
+            One message per confident hypothesis.
+        """
+        if (
+            self.buffer.get_num_observations_on_object() < 1
+            or not self.buffer.get_last_obs_processed()
+            or self.terminal_state != "match"
+        ):
+            return []
+
+        evidences_by_graph = {
+            graph_id: hyp.evidence for graph_id, hyp in self._hypotheses.items()
+        }
+        evidences = get_scaled_evidences(evidences_by_graph)
+        messages = []
+        for graph_id, scaled_evidence in evidences.items():
+            channels = self.graph_memory.get_input_channels_in_graph(graph_id)
+            if receiver_id not in channels:
+                continue
+            hyp_ids = np.where(scaled_evidence > self.top_down_evidence_threshold)[0]
+            if len(hyp_ids) == 0:
+                continue
+            hypotheses = self._hypotheses[graph_id]
+            locations = hypotheses.locations[hyp_ids]
+
+            graph = self.graph_memory.get_graph(graph_id, receiver_id)
+            node_ids = graph.find_nearest_neighbors(locations, num_neighbors=1)
+            on_graph = (
+                np.linalg.norm(graph.pos[node_ids] - locations, axis=1)
+                <= self.max_match_distance
+            )
+            hyp_ids, node_ids = hyp_ids[on_graph], node_ids[on_graph]
+            if len(hyp_ids) == 0:
+                continue
+
+            object_ids = graph.get_values_for_feature("object_id")
+            child_locations = graph.get_values_for_feature("location_rel_model")
+            child_poses = graph.get_values_for_feature("pose_vectors")
+            fully_defined = graph.get_values_for_feature("pose_fully_defined")
+
+            for hyp_id, node_id in zip(hyp_ids, node_ids):
+                messages.append(
+                    Message(
+                        # Already in the receiver's model reference frame
+                        location=child_locations[node_id],
+                        morphological_features={
+                            "pose_vectors": child_poses[node_id].reshape(3, 3)
+                            @ hypotheses.poses[hyp_id],
+                            # Stored as float and averaged within a voxel in
+                            # `GridObjectModel`, so values lie in [0, 1].
+                            "pose_fully_defined": bool(
+                                fully_defined[node_id, 0] >= 0.5
+                            ),
+                        },
+                        non_morphological_features={
+                            "object_id": int(np.rint(object_ids[node_id, 0]))
+                        },
+                        confidence=float(
+                            np.clip(
+                                hypotheses.evidence[hyp_id] / len(self.buffer), 0, 1
+                            )
+                        ),
+                        pass_message=True,
+                        process_features_in_lm=True,
+                        sender_id=self.learning_module_id,
+                        sender_type="LM",
+                    )
+                )
+        return messages
 
     def get_output(self) -> Message | None:
         """Return the most likely hypothesis in same format as LM input.
