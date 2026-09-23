@@ -169,6 +169,11 @@ class EvidenceGraphLM(GraphLM):
             when being added to the overall evidence of a hypothesis. If past_weight
             and present_weight add up to 1, it is used as a weight in np.average to
             keep the evidence in a fixed range.
+        top_down_weight: Top-down confidence (between 0 and 1) is multiplied by
+            this value when being added to the evidence of a hypothesis near a
+            top-down target, and when setting the evidence of a hypothesis created
+            at a target no hypothesis is near. Like vote_weight, it is used as a
+            weight in np.average when past_weight and present_weight add up to 1.
 
     Terminal Condition Attributes:
         object_evidence_threshold: Minimum required evidence for an object to be
@@ -191,7 +196,9 @@ class EvidenceGraphLM(GraphLM):
         path_similarity_threshold: How similar do paths have to be to be
             considered the same in the terminal condition check.
         pose_similarity_threshold: difference between two poses to be considered
-            unique when checking for the terminal condition (in radians).
+            unique when checking for the terminal condition (in radians). Also the
+            largest difference between a hypothesis pose and a top-down target pose
+            for the target to boost the hypothesis evidence.
         required_symmetry_evidence: number of steps with unchanged possible poses
             to classify an object as symmetric and go into terminal condition.
 
@@ -249,6 +256,7 @@ class EvidenceGraphLM(GraphLM):
         past_weight=1,
         present_weight=1,
         vote_weight=1,
+        top_down_weight: float = 1,
         object_evidence_threshold=1,
         x_percent_threshold=10,
         path_similarity_threshold=0.1,
@@ -290,6 +298,7 @@ class EvidenceGraphLM(GraphLM):
         self.past_weight = past_weight
         self.present_weight = present_weight
         self.vote_weight = vote_weight
+        self.top_down_weight = top_down_weight
         # --- Terminal Condition Params ---
         self.object_evidence_threshold = object_evidence_threshold
         self.x_percent_threshold = x_percent_threshold
@@ -530,6 +539,41 @@ class EvidenceGraphLM(GraphLM):
                 "sensed_pose_rel_body": sensed_pose,
             }
         return vote
+
+    def receive_top_down(self, messages: Sequence[Message]) -> None:
+        """Bias the hypotheses of the objects sent in the top-down messages.
+
+        Args:
+            messages: Top-down input from the higher-level learning modules.
+        """
+        if self.buffer.get_num_observations_on_object() > 0:
+            thread_list = []
+            for graph_id in self.get_all_known_object_ids():
+                # Messages name the object by its hashed ID, and the hash is
+                # one-way, so we hash our own graph ID to compare.
+                object_id = self._object_id_to_features(graph_id)
+                graph_messages = [
+                    message
+                    for message in messages
+                    if message.non_morphological_features["object_id"] == object_id
+                ]
+                if graph_messages:
+                    if self.use_multithreading:
+                        t = threading.Thread(
+                            target=self._update_evidence_with_top_down,
+                            args=(graph_messages, graph_id),
+                        )
+                        thread_list.append(t)
+                    else:  # This can be useful for debugging.
+                        self._update_evidence_with_top_down(graph_messages, graph_id)
+            if self.use_multithreading:
+                for thread in thread_list:
+                    thread.start()
+                for thread in thread_list:
+                    thread.join()
+            logger.debug("Updating possible matches after top-down input")
+            self.possible_matches = self._threshold_possible_matches()
+            self.current_mlh = self._calculate_most_likely_hypothesis()
 
     def send_top_down(self, receiver_id: str) -> list[Message]:
         """Create top-down messages to be sent to the receiver LL-LM.
