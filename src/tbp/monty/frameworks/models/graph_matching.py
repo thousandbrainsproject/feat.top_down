@@ -29,6 +29,7 @@ from tbp.monty.frameworks.models.abstract_monty_classes import (
     LMMemory,
 )
 from tbp.monty.frameworks.models.buffer import FeatureAtLocationBuffer
+from tbp.monty.frameworks.models.connectivity import Connection
 from tbp.monty.frameworks.models.goal_generation import GraphGoalGenerator
 from tbp.monty.frameworks.models.monty_base import MontyBase
 from tbp.monty.frameworks.models.object_model import GraphObjectModel
@@ -76,16 +77,20 @@ class MontyForGraphMatching(MontyBase):
 
         logger.debug(f"Matches after voting (LM {lm_id}): {lm.get_possible_matches()}")
 
-    def update_stats_after_vote(self, lm):
-        """Add voting stats to buffer and check individual terminal condition."""
+    def update_stats_and_terminal_state(self, lm):
+        """Refresh the LM's last stats entry and individual terminal state.
+
+        Called after message from outside the LM's own step, such as votes or top-down
+        input, changed its hypotheses.
+        """
         stats = lm.collect_stats_to_save()
         lm.buffer.update_last_stats_entry(stats)
         num_matches = len(lm.get_possible_matches())
         if num_matches == 0:
             lm.set_individual_ts(terminal_state="no_match")
         elif num_matches > 0 and lm.terminal_state == "no_match":
-            # Allow LM to recover from no_match state if votes from other LMs have
-            # made it have possible matches now.
+            # Allow LM to recover from no_match state if votes or top-down input
+            # from other LMs have made it have possible matches now.
             lm.set_individual_ts(terminal_state=None)
 
     def check_if_any_lms_updated(self):
@@ -378,7 +383,7 @@ class MontyForGraphMatching(MontyBase):
             for i in range(len(self.learning_modules)):
                 logger.debug(f"------ Sending votes to LM {i} -------")
                 self.send_vote_to_lm(self.learning_modules[i], i, combined_votes)
-                self.update_stats_after_vote(self.learning_modules[i])
+                self.update_stats_and_terminal_state(self.learning_modules[i])
 
         # Log possible matches
         for lm in self.learning_modules:
@@ -388,6 +393,23 @@ class MontyForGraphMatching(MontyBase):
                 else []
             )
             logger.info(f"Possible matches for {lm.learning_module_id}: {pm}")
+
+    def _pass_top_down(self) -> None:
+        # Send out top-down input
+        top_down_input_per_lm = []
+        for i in range(len(self.learning_modules)):
+            receiver_id = self.learning_modules[i].learning_module_id
+            top_down_input: list[Message] = []
+            for j in self._connectivity.senders_to(i, Connection.TOP_DOWN):
+                top_down_input.extend(
+                    self.learning_modules[j].send_top_down(receiver_id)
+                )
+            top_down_input_per_lm.append(top_down_input)
+        # Receive top-down input
+        for i in range(len(self.learning_modules)):
+            if top_down_input_per_lm[i]:
+                self.learning_modules[i].receive_top_down(top_down_input_per_lm[i])
+                self.update_stats_and_terminal_state(self.learning_modules[i])
 
     def _set_step_type_and_check_if_done(self):
         """Check terminal conditions and decide if we change the step type."""
