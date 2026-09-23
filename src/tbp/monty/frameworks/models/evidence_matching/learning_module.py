@@ -596,6 +596,8 @@ class EvidenceGraphLM(GraphLM):
                         morphological_features={
                             "pose_vectors": child_poses[node_id].reshape(3, 3)
                             @ hypotheses.poses[hyp_id],
+                            # Stored as float and averaged within a voxel in
+                            # `GridObjectModel`, so values lie in [0, 1].
                             "pose_fully_defined": bool(
                                 fully_defined[node_id, 0] >= 0.5
                             ),
