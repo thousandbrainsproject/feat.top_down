@@ -909,6 +909,9 @@ class EvidenceLMTopDownTest(BaseGraphTest):
             self.LEARNED_GRAPH_ID, "patch"
         ).pos
         num_nodes = len(node_locations)
+
+        # Mirrors `_update_memory`, which stores features relative to the model by
+        # rotating them with the inverse of the detected rotation.
         _, stored = apply_rf_transform_to_points(
             locations=np.zeros((1, 3)),
             features={"pose_vectors": child_pose.as_matrix().reshape(1, 9)},
