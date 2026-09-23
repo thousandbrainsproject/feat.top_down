@@ -1168,6 +1168,88 @@ class EvidenceGraphLM(GraphLM):
                 axis=0,
             )
 
+    def _update_evidence_with_top_down(
+        self, messages: list[Message], graph_id: str
+    ) -> None:
+        """Use top-down messages to update and add hypotheses of one graph.
+
+        Each hypothesis looks at its nearest messages. One of them matches the
+        hypothesis when their locations are within `max_match_distance` and their
+        poses are within `pose_similarity_threshold`. Each hypothesis gains the
+        highest confidence among the messages that match it. Each message that
+        matches no hypothesis becomes a hypothesis at its location and pose with
+        evidence `top_down_weight * confidence`.
+
+        Args:
+            messages: Top-down messages for this graph's object.
+            graph_id: ID of the graph whose hypotheses are updated.
+        """
+        graph_hyps = self._hypotheses[graph_id]
+
+        target_locations = np.array([m.location for m in messages])
+        target_poses = np.array(
+            [m.morphological_features["pose_vectors"] for m in messages]
+        )
+        target_confidences = np.array([m.confidence for m in messages])
+
+        target_location_tree = KDTree(
+            target_locations,
+            leafsize=40,
+        )
+        target_nn = 3
+        if target_locations.shape[0] < target_nn:
+            target_nn = target_locations.shape[0]
+        # Get target_nn closest targets and their distances
+        (radius_target_dists, radius_target_ids) = target_location_tree.query(
+            graph_hyps.locations,
+            k=target_nn,
+            p=2,
+            workers=1,
+        )
+        if target_nn == 1:
+            radius_target_dists = np.expand_dims(radius_target_dists, axis=1)
+            radius_target_ids = np.expand_dims(radius_target_ids, axis=1)
+        within_distance = self._get_node_distance_weights(radius_target_dists) > 0
+
+        # The same angle formula as in _check_for_unique_poses.
+        traces = np.einsum(
+            "nij,nkij->nk", graph_hyps.poses, target_poses[radius_target_ids]
+        )
+        angles = np.arccos(np.clip((traces - 1) / 2, -1, 1))
+        within_angle = angles <= self.pose_similarity_threshold
+
+        matched_targets = within_distance & within_angle
+
+        top_down_evidence = np.ma.max(
+            np.ma.array(target_confidences[radius_target_ids], mask=~matched_targets),
+            axis=1,
+        )
+        if self.past_weight + self.present_weight == 1:
+            # Take the average to keep evidence in range
+            graph_hyps.evidence = np.ma.average(
+                [graph_hyps.evidence, top_down_evidence],
+                weights=[1, self.top_down_weight],
+                axis=0,
+            )
+        else:
+            # Add to evidence count if the evidence can grow infinitely.
+            graph_hyps.evidence = np.ma.sum(
+                [graph_hyps.evidence, top_down_evidence * self.top_down_weight],
+                axis=0,
+            )
+
+        unmatched_targets = np.ones(len(messages), dtype=np.bool_)
+        unmatched_targets[radius_target_ids[matched_targets]] = False
+        created_hyps = Hypotheses(
+            evidence=self.top_down_weight * target_confidences[unmatched_targets],
+            locations=target_locations[unmatched_targets],
+            poses=target_poses[unmatched_targets],
+            possible=np.zeros(np.count_nonzero(unmatched_targets), dtype=np.bool_),
+        )
+        self._hypotheses[graph_id] = self.hypotheses_updater.add_hypotheses(
+            graph_hyps, created_hyps, graph_id
+        )
+
     def _check_for_unique_poses(
         self,
         graph_id,
