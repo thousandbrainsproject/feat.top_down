@@ -12,6 +12,7 @@ from __future__ import annotations
 import copy
 
 import numpy as np
+import numpy.typing as npt
 from hypothesis import given, settings
 from hypothesis import strategies as st
 from hypothesis.extra.numpy import arrays
@@ -59,6 +60,7 @@ def elm_with_fake_object(
     fake_obs: list[Message],
     initial_possible_poses: str = "informed",
     gsg: EvidenceGoalGenerator | None = None,
+    top_down_weight: float = 1,
 ) -> EvidenceGraphLM:
     """Learn one object from fake observations.
 
@@ -67,6 +69,7 @@ def elm_with_fake_object(
         fake_obs: Observations to explore, one per step.
         initial_possible_poses: How the hypotheses updater seeds its poses.
         gsg: Goal state generator, or None for a learning module without one.
+        top_down_weight: Weight of top-down input to the learning module.
 
     Returns:
         A learning module holding `new_object0` in memory.
@@ -87,6 +90,7 @@ def elm_with_fake_object(
         # set graph size larger since fake obs displacements are meters
         max_graph_size=10,
         gsg=gsg,
+        top_down_weight=top_down_weight,
         hypotheses_updater_args=dict(
             initial_possible_poses=initial_possible_poses,
         ),
@@ -872,6 +876,31 @@ class EvidenceLMTopDownTest(BaseGraphTest):
     CHILD_OBJECT_ID = 100
     SENDING_EVIDENCE = 2.0
     UNROTATED = Rotation.identity()
+    CONFIDENCE = 0.5
+    DOMINANT_TOP_DOWN_WEIGHT = 100.0
+    """Large enough for a created hypothesis to outweigh every other hypothesis."""
+
+    def elm_after_matching(self, top_down_weight: float = 1) -> EvidenceGraphLM:
+        """Learn the fake object, then match it over the same observations.
+
+        Args:
+            top_down_weight: Weight of top-down input to the learning module.
+
+        Returns:
+            The learning module, with the learned object as its MLH.
+        """
+        graph_lm = elm_with_fake_object(
+            self.ctx,
+            copy.deepcopy(self.fake_obs_learn),
+            top_down_weight=top_down_weight,
+        )
+        graph_lm.mode = ExperimentMode.EVAL
+        graph_lm.reset_stm()
+        graph_lm.fixme_reset_ground_truth(primary_target=self.placeholder_target)
+        for observation in copy.deepcopy(self.fake_obs_learn):
+            graph_lm.add_lm_processing_to_buffer_stats(lm_processed=True)
+            graph_lm.matching_step(self.ctx, [observation])
+        return graph_lm
 
     def elm_ready_to_send_top_down(
         self,
@@ -891,13 +920,7 @@ class EvidenceLMTopDownTest(BaseGraphTest):
         Returns:
             The learning module, in a "match" terminal state.
         """
-        graph_lm = elm_with_fake_object(self.ctx, copy.deepcopy(self.fake_obs_learn))
-        graph_lm.mode = ExperimentMode.EVAL
-        graph_lm.reset_stm()
-        graph_lm.fixme_reset_ground_truth(primary_target=self.placeholder_target)
-        for observation in copy.deepcopy(self.fake_obs_learn):
-            graph_lm.add_lm_processing_to_buffer_stats(lm_processed=True)
-            graph_lm.matching_step(self.ctx, [observation])
+        graph_lm = self.elm_after_matching()
         channel_model = GridObjectModel(
             self.LEARNED_GRAPH_ID,
             max_nodes=graph_lm.graph_memory.max_nodes_per_graph,
@@ -991,3 +1014,159 @@ class EvidenceLMTopDownTest(BaseGraphTest):
             atol=DEFAULT_TOLERANCE,
             err_msg="Pose vectors should be the ones the child sent up.",
         )
+
+    @settings(deadline=1000)
+    @given(
+        confidences=st.lists(st.floats(0, 1), min_size=2, max_size=2),
+        top_down_weight=st.floats(0, 10),
+    )
+    def test_top_down_input_boosts_the_mlh_by_weight_times_the_highest_confidence(
+        self, confidences: list[float], top_down_weight: float
+    ) -> None:
+        graph_lm = self.elm_after_matching(top_down_weight)
+        output = graph_lm.get_output()
+        mlh_evidence = graph_lm.current_mlh["evidence"]
+
+        graph_lm.receive_top_down(
+            [
+                top_down_message(
+                    output.non_morphological_features["location_rel_model"],
+                    output.morphological_features["pose_vectors"],
+                    output.non_morphological_features["object_id"],
+                    confidence,
+                )
+                for confidence in confidences
+            ]
+        )
+
+        self.assertAlmostEqual(
+            graph_lm.current_mlh["evidence"],
+            mlh_evidence + top_down_weight * max(confidences),
+            msg="The MLH should gain the evidence of the highest confidence message.",
+        )
+
+    def test_top_down_input_creates_a_hypothesis_at_a_target_no_hypothesis_is_near(
+        self,
+    ) -> None:
+        graph_lm = self.elm_after_matching(self.DOMINANT_TOP_DOWN_WEIGHT)
+        output = graph_lm.get_output()
+        target_location = output.non_morphological_features[
+            "location_rel_model"
+        ] + np.array([2 * graph_lm.max_match_distance, 0, 0])
+        pose = output.morphological_features["pose_vectors"]
+
+        graph_lm.receive_top_down(
+            [
+                top_down_message(
+                    target_location,
+                    pose,
+                    output.non_morphological_features["object_id"],
+                    self.CONFIDENCE,
+                )
+            ]
+        )
+
+        np.testing.assert_allclose(
+            graph_lm.current_mlh["location"],
+            target_location,
+            err_msg="The created hypothesis should be created at the target location.",
+        )
+        np.testing.assert_allclose(
+            graph_lm.current_mlh["rotation"].as_matrix(),
+            pose,
+            rtol=0,
+            atol=DEFAULT_TOLERANCE,
+            err_msg="The created hypothesis should have the target pose.",
+        )
+        self.assertAlmostEqual(
+            graph_lm.current_mlh["evidence"],
+            self.DOMINANT_TOP_DOWN_WEIGHT * self.CONFIDENCE,
+            msg="A created hypothesis starts at the weighted confidence.",
+        )
+
+    def test_top_down_input_creates_a_hypothesis_when_the_pose_disagrees(
+        self,
+    ) -> None:
+        graph_lm = self.elm_after_matching(self.DOMINANT_TOP_DOWN_WEIGHT)
+        output = graph_lm.get_output()
+        location = output.non_morphological_features["location_rel_model"]
+        pose = (
+            output.morphological_features["pose_vectors"]
+            @ Rotation.from_euler(
+                "z", graph_lm.pose_similarity_threshold + 0.1
+            ).as_matrix()
+        )
+
+        graph_lm.receive_top_down(
+            [
+                top_down_message(
+                    location,
+                    pose,
+                    output.non_morphological_features["object_id"],
+                    self.CONFIDENCE,
+                )
+            ]
+        )
+
+        np.testing.assert_allclose(
+            graph_lm.current_mlh["location"],
+            location,
+            err_msg="The created hypothesis should be created at the target location.",
+        )
+        np.testing.assert_allclose(
+            graph_lm.current_mlh["rotation"].as_matrix(),
+            pose,
+            rtol=0,
+            atol=DEFAULT_TOLERANCE,
+            err_msg="The created hypothesis should have the target pose.",
+        )
+        self.assertAlmostEqual(
+            graph_lm.current_mlh["evidence"],
+            self.DOMINANT_TOP_DOWN_WEIGHT * self.CONFIDENCE,
+            msg="A created hypothesis starts at the weighted confidence.",
+        )
+
+    def test_top_down_input_for_an_unknown_object_does_nothing(self) -> None:
+        graph_lm = self.elm_after_matching()
+        output = graph_lm.get_output()
+        graph_ids, evidences = graph_lm.evidence_for_each_graph()
+
+        graph_lm.receive_top_down(
+            [
+                top_down_message(
+                    output.non_morphological_features["location_rel_model"],
+                    output.morphological_features["pose_vectors"],
+                    output.non_morphological_features["object_id"] + 1,
+                    self.CONFIDENCE,
+                )
+            ]
+        )
+
+        graph_ids_after, evidences_after = graph_lm.evidence_for_each_graph()
+        self.assertEqual(graph_ids_after, graph_ids)
+        np.testing.assert_array_equal(
+            evidences_after,
+            evidences,
+            err_msg="Top-down input about an unknown object should not change evidence.",
+        )
+
+
+def top_down_message(
+    location: npt.NDArray[np.float64],
+    pose_vectors: npt.NDArray[np.float64],
+    object_id: int,
+    confidence: float,
+) -> Message:
+    return Message(
+        location=location,
+        morphological_features={
+            "pose_vectors": pose_vectors,
+            "pose_fully_defined": True,
+        },
+        non_morphological_features={"object_id": object_id},
+        confidence=confidence,
+        pass_message=True,
+        process_features_in_lm=True,
+        sender_id="learning_module_2",
+        sender_type="LM",
+    )
