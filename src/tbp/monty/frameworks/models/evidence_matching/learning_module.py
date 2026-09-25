@@ -170,10 +170,13 @@ class EvidenceGraphLM(GraphLM):
             and present_weight add up to 1, it is used as a weight in np.average to
             keep the evidence in a fixed range.
         top_down_weight: Top-down confidence (between 0 and 1) is multiplied by
-            this value when being added to the evidence of a hypothesis near a
-            top-down target, and when setting the evidence of a hypothesis created
-            at a target no hypothesis is near. Like vote_weight, it is used as a
-            weight in np.average when past_weight and present_weight add up to 1.
+            this value when:
+            - adding to the evidence of a hypothesis near an existing top-down
+              target
+            - setting the evidence of a new hypothesis created at a target no
+              hypothesis is near
+            Like vote_weight, it is used as a weight in np.average when past_weight
+            and present_weight add up to 1.
 
     Terminal Condition Attributes:
         object_evidence_threshold: Minimum required evidence for an object to be
