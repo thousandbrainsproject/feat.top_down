@@ -1215,6 +1215,10 @@ class EvidenceGraphLM(GraphLM):
         within_distance = self._get_node_distance_weights(radius_target_dists) > 0
 
         # The same angle formula as in _check_for_unique_poses.
+        # n is the hypotheses, k their target_nn nearest targets,
+        # and i, j the rows and columns of the 3x3 rotation matrices.
+        # Summing the elementwise product over i and j gives trace(R_hyp^T @ R_target)
+        # without building the full 3x3 matmul for each rotation comparison.
         traces = np.einsum(
             "nij,nkij->nk", graph_hyps.poses, target_poses[radius_target_ids]
         )
