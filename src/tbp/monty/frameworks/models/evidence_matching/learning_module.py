@@ -169,6 +169,14 @@ class EvidenceGraphLM(GraphLM):
             when being added to the overall evidence of a hypothesis. If past_weight
             and present_weight add up to 1, it is used as a weight in np.average to
             keep the evidence in a fixed range.
+        top_down_weight: Top-down confidence (between 0 and 1) is multiplied by
+            this value when:
+            - adding to the evidence of a hypothesis near an existing top-down
+              target
+            - setting the evidence of a new hypothesis created at a target no
+              hypothesis is near
+            Like vote_weight, it is used as a weight in np.average when past_weight
+            and present_weight add up to 1.
 
     Terminal Condition Attributes:
         object_evidence_threshold: Minimum required evidence for an object to be
@@ -191,7 +199,9 @@ class EvidenceGraphLM(GraphLM):
         path_similarity_threshold: How similar do paths have to be to be
             considered the same in the terminal condition check.
         pose_similarity_threshold: difference between two poses to be considered
-            unique when checking for the terminal condition (in radians).
+            unique when checking for the terminal condition (in radians). Also the
+            largest difference between a hypothesis pose and a top-down target pose
+            for the target to boost the hypothesis evidence.
         required_symmetry_evidence: number of steps with unchanged possible poses
             to classify an object as symmetric and go into terminal condition.
 
@@ -249,6 +259,7 @@ class EvidenceGraphLM(GraphLM):
         past_weight=1,
         present_weight=1,
         vote_weight=1,
+        top_down_weight: float = 1,
         object_evidence_threshold=1,
         x_percent_threshold=10,
         path_similarity_threshold=0.1,
@@ -290,6 +301,7 @@ class EvidenceGraphLM(GraphLM):
         self.past_weight = past_weight
         self.present_weight = present_weight
         self.vote_weight = vote_weight
+        self.top_down_weight = top_down_weight
         # --- Terminal Condition Params ---
         self.object_evidence_threshold = object_evidence_threshold
         self.x_percent_threshold = x_percent_threshold
@@ -530,6 +542,41 @@ class EvidenceGraphLM(GraphLM):
                 "sensed_pose_rel_body": sensed_pose,
             }
         return vote
+
+    def receive_top_down(self, messages: Sequence[Message]) -> None:
+        """Bias the hypotheses of the objects sent in the top-down messages.
+
+        Args:
+            messages: Top-down input from the higher-level learning modules.
+        """
+        if self.buffer.get_num_observations_on_object() > 0:
+            thread_list = []
+            for graph_id in self.get_all_known_object_ids():
+                # Messages name the object by its hashed ID, and the hash is
+                # one-way, so we hash our own graph ID to compare.
+                object_id = self._object_id_to_features(graph_id)
+                graph_messages = [
+                    message
+                    for message in messages
+                    if message.non_morphological_features["object_id"] == object_id
+                ]
+                if graph_messages:
+                    if self.use_multithreading:
+                        t = threading.Thread(
+                            target=self._update_evidence_with_top_down,
+                            args=(graph_messages, graph_id),
+                        )
+                        thread_list.append(t)
+                    else:  # This can be useful for debugging.
+                        self._update_evidence_with_top_down(graph_messages, graph_id)
+            if self.use_multithreading:
+                for thread in thread_list:
+                    thread.start()
+                for thread in thread_list:
+                    thread.join()
+            logger.debug("Updating possible matches after top-down input")
+            self.possible_matches = self._threshold_possible_matches()
+            self.current_mlh = self._calculate_most_likely_hypothesis()
 
     def send_top_down(self, receiver_id: str) -> list[Message]:
         """Create top-down messages to be sent to the receiver LL-LM.
@@ -1123,6 +1170,92 @@ class EvidenceGraphLM(GraphLM):
                 ],
                 axis=0,
             )
+
+    def _update_evidence_with_top_down(
+        self, messages: list[Message], graph_id: str
+    ) -> None:
+        """Use top-down messages to update and add hypotheses of one graph.
+
+        Each hypothesis looks at its nearest messages. One of them matches the
+        hypothesis when their locations are within `max_match_distance` and their
+        poses are within `pose_similarity_threshold`. Each hypothesis gains the
+        highest confidence among the messages that match it. Each message that
+        matches no hypothesis becomes a hypothesis at its location and pose with
+        evidence `top_down_weight * confidence`.
+
+        Args:
+            messages: Top-down messages for this graph's object.
+            graph_id: ID of the graph whose hypotheses are updated.
+        """
+        graph_hyps = self._hypotheses[graph_id]
+
+        target_locations = np.array([m.location for m in messages])
+        target_poses = np.array(
+            [m.morphological_features["pose_vectors"] for m in messages]
+        )
+        target_confidences = np.array([m.confidence for m in messages])
+
+        target_location_tree = KDTree(
+            target_locations,
+            leafsize=40,
+        )
+        target_nn = 3
+        if target_locations.shape[0] < target_nn:
+            target_nn = target_locations.shape[0]
+        # Get target_nn closest targets and their distances
+        (radius_target_dists, radius_target_ids) = target_location_tree.query(
+            graph_hyps.locations,
+            k=target_nn,
+            p=2,
+            workers=1,
+        )
+        if target_nn == 1:
+            radius_target_dists = np.expand_dims(radius_target_dists, axis=1)
+            radius_target_ids = np.expand_dims(radius_target_ids, axis=1)
+        within_distance = self._get_node_distance_weights(radius_target_dists) > 0
+
+        # The same angle formula as in _check_for_unique_poses.
+        # n is the hypotheses, k their target_nn nearest targets,
+        # and i, j the rows and columns of the 3x3 rotation matrices.
+        # Summing the elementwise product over i and j gives trace(R_hyp^T @ R_target)
+        # without building the full 3x3 matmul for each rotation comparison.
+        traces = np.einsum(
+            "nij,nkij->nk", graph_hyps.poses, target_poses[radius_target_ids]
+        )
+        angles = np.arccos(np.clip((traces - 1) / 2, -1, 1))
+        within_angle = angles <= self.pose_similarity_threshold
+
+        matched_targets = within_distance & within_angle
+
+        top_down_evidence = np.ma.max(
+            np.ma.array(target_confidences[radius_target_ids], mask=~matched_targets),
+            axis=1,
+        )
+        if self.past_weight + self.present_weight == 1:
+            # Take the average to keep evidence in range
+            graph_hyps.evidence = np.ma.average(
+                [graph_hyps.evidence, top_down_evidence],
+                weights=[1, self.top_down_weight],
+                axis=0,
+            )
+        else:
+            # Add to evidence count if the evidence can grow infinitely.
+            graph_hyps.evidence = np.ma.sum(
+                [graph_hyps.evidence, top_down_evidence * self.top_down_weight],
+                axis=0,
+            )
+
+        unmatched_targets = np.ones(len(messages), dtype=np.bool_)
+        unmatched_targets[radius_target_ids[matched_targets]] = False
+        created_hyps = Hypotheses(
+            evidence=self.top_down_weight * target_confidences[unmatched_targets],
+            locations=target_locations[unmatched_targets],
+            poses=target_poses[unmatched_targets],
+            possible=np.zeros(np.count_nonzero(unmatched_targets), dtype=np.bool_),
+        )
+        self._hypotheses[graph_id] = self.hypotheses_updater.add_hypotheses(
+            graph_hyps, created_hyps, graph_id
+        )
 
     def _check_for_unique_poses(
         self,

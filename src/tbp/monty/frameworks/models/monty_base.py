@@ -318,7 +318,7 @@ class MontyBase(Monty):
         top_down_input_per_lm = []
         for i in range(len(self.learning_modules)):
             receiver_id = self.learning_modules[i].learning_module_id
-            top_down_input = []
+            top_down_input: list[Message] = []
             for j in self._connectivity.senders_to(i, Connection.TOP_DOWN):
                 top_down_input.extend(
                     self.learning_modules[j].send_top_down(receiver_id)

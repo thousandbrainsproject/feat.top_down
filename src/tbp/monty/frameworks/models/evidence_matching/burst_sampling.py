@@ -410,6 +410,15 @@ class BurstSamplingHypothesesUpdater:
 
         return hypotheses_update, telemetry
 
+    def add_hypotheses(
+        self,
+        hypotheses: Hypotheses,
+        new_hypotheses: Hypotheses,
+        graph_id: str,
+    ) -> Hypotheses:
+        self.evidence_slope_trackers[graph_id].add_hyp(new_hypotheses.count)
+        return Hypotheses.concatenate([hypotheses, new_hypotheses])
+
     def _num_hyps_per_node(self, features: dict[str, Any]) -> int:
         """Calculate the number of hypotheses per node.
 

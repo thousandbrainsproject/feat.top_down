@@ -97,6 +97,24 @@ class HypothesesUpdater(ContextManager[Self], Protocol):
         """
         ...
 
+    def add_hypotheses(
+        self,
+        hypotheses: Hypotheses,
+        new_hypotheses: Hypotheses,
+        graph_id: str,
+    ) -> Hypotheses:
+        """Add hypotheses that the updater did not sample itself.
+
+        Args:
+            hypotheses: Hypothesis space for the graph.
+            new_hypotheses: Hypotheses to add, e.g. created from top-down input.
+            graph_id: ID of the graph being updated.
+
+        Returns:
+            The hypothesis space with the `new_hypotheses`.
+        """
+        ...
+
 
 class DefaultHypothesesUpdater(HypothesesUpdater):
     def __init__(
@@ -281,6 +299,14 @@ class DefaultHypothesesUpdater(HypothesesUpdater):
 
         telemetry = {"mlh_prediction_error": displacer_telemetry.mlh_prediction_error}
         return updated_hypotheses, telemetry
+
+    def add_hypotheses(
+        self,
+        hypotheses: Hypotheses,
+        new_hypotheses: Hypotheses,
+        graph_id: str,  # noqa: ARG002
+    ) -> Hypotheses:
+        return Hypotheses.concatenate([hypotheses, new_hypotheses])
 
     def _initialize_new_channels(
         self,
