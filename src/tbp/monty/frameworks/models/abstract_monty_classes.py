@@ -393,6 +393,14 @@ class RuntimeLearningModule(Protocol):
         """
         ...
 
+    def propose_region(self) -> AttentionRegion:
+        """Return the region this LM wants the attention system to weigh.
+
+        Returns:
+            The proposed region. Empty if this LM has nothing to propose.
+        """
+        ...
+
     def get_output(self) -> Message | None:
         """Return learning module output (same format as input)."""
         ...
@@ -468,6 +476,9 @@ class LearningModule(
     @abc.abstractmethod
     def propose_goals(self) -> list[Goal]:
         pass
+
+    def propose_region(self) -> AttentionRegion:
+        return AttentionRegion.empty()
 
     @abc.abstractmethod
     def get_output(self) -> Message | None:

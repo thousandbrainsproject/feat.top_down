@@ -20,7 +20,7 @@ import numpy as np
 import numpy.typing as npt
 from scipy.spatial import KDTree
 
-from tbp.monty.cmp import Message, location_mean
+from tbp.monty.cmp import AttentionRegion, Message, location_mean
 from tbp.monty.context import RuntimeContext
 from tbp.monty.frameworks.experiments.mode import ExperimentMode
 from tbp.monty.frameworks.models.evidence_matching.graph_memory import (
@@ -33,6 +33,9 @@ from tbp.monty.frameworks.models.evidence_matching.hypotheses_updater import (
     DefaultHypothesesUpdater,
     HypothesesUpdater,
     HypothesesUpdaterTelemetry,
+)
+from tbp.monty.frameworks.models.evidence_matching.region_proposal.protocol import (
+    RegionProposer,
 )
 from tbp.monty.frameworks.models.goal_generation import EvidenceGoalGenerator
 from tbp.monty.frameworks.models.graph_matching import GraphLM
@@ -234,6 +237,8 @@ class EvidenceGraphLM(GraphLM):
             represented as one value. num_model_voxels_per_dim should not be too large
             since the memory requirements grow cubically with this number.
         gsg: The goal generator to associate with the LM.
+        region_proposers: Strategies that turn the LM's goals into attention
+            regions. The LM proposes the concatenation of their regions.
         hypotheses_updater_class: The type of hypotheses updater to associate with the
             LM.
         hypotheses_updater_args: Dictionary of configuration parameters for the
@@ -281,6 +286,7 @@ class EvidenceGraphLM(GraphLM):
         num_model_voxels_per_dim=50,  # -> voxel size = 6mm3 (0.006)
         use_multithreading=True,
         gsg: EvidenceGoalGenerator | None = None,
+        region_proposers: Sequence[RegionProposer] = (),
         hypotheses_updater_class: type[HypothesesUpdater] = DefaultHypothesesUpdater,
         hypotheses_updater_args: dict | None = None,
         *args,
@@ -298,6 +304,7 @@ class EvidenceGraphLM(GraphLM):
         self.gsg = gsg
         if self.gsg:
             self.gsg.parent_lm = self
+        self.region_proposers = region_proposers
 
         # --- Matching Params ---
         self.max_match_distance = max_match_distance
@@ -677,6 +684,17 @@ class EvidenceGraphLM(GraphLM):
                     )
                 )
         return messages
+
+    def propose_region(self) -> AttentionRegion:
+        """Return the regions the region proposers make of this LM's goals.
+
+        Returns:
+            The concatenated regions. Empty without region proposers.
+        """
+        goals = self.propose_goals()
+        return AttentionRegion.concat(
+            proposer(goals) for proposer in self.region_proposers
+        )
 
     def get_output(self) -> Message | None:
         """Return the most likely hypothesis in same format as LM input.

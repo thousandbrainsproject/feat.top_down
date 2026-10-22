@@ -10,6 +10,8 @@
 from __future__ import annotations
 
 import copy
+import unittest
+from unittest.mock import MagicMock, patch, sentinel
 
 import numpy as np
 import numpy.typing as npt
@@ -18,7 +20,7 @@ from hypothesis import strategies as st
 from hypothesis.extra.numpy import arrays
 from omegaconf import OmegaConf
 
-from tbp.monty.cmp import Message
+from tbp.monty.cmp import AttentionRegion, Message
 from tbp.monty.context import RuntimeContext
 from tbp.monty.frameworks.experiments.mode import ExperimentMode
 from tbp.monty.frameworks.models.evidence_matching.learning_module import (
@@ -1229,3 +1231,34 @@ class EvidenceLMOutputGateTest(BaseGraphTest):
         self.move_mlh_to(graph_lm, nodes[0])
 
         self.assertTrue(graph_lm.get_output().pass_message)
+
+
+class EvidenceLMProposeRegionTest(unittest.TestCase):
+    def region_at(self, *xs: float) -> AttentionRegion:
+        return AttentionRegion.uniform([[x, 0.0, 0.0] for x in xs], 1.0)
+
+    def elm(self, *proposers: MagicMock) -> EvidenceGraphLM:
+        return EvidenceGraphLM(
+            max_match_distance=0.005,
+            tolerances={},
+            feature_weights={},
+            region_proposers=proposers,
+        )
+
+    def test_without_proposers_the_region_is_empty(self) -> None:
+        graph_lm = self.elm()
+
+        with patch.object(graph_lm, "propose_goals", return_value=[sentinel.goal]):
+            self.assertEqual(len(graph_lm.propose_region()), 0)
+
+    def test_concatenates_the_regions_proposed_from_the_lm_goals(self) -> None:
+        first = MagicMock(return_value=self.region_at(1.0, 2.0))
+        second = MagicMock(return_value=self.region_at(3.0))
+        graph_lm = self.elm(first, second)
+
+        with patch.object(graph_lm, "propose_goals", return_value=[sentinel.goal]):
+            region = graph_lm.propose_region()
+
+        first.assert_called_once_with([sentinel.goal])
+        second.assert_called_once_with([sentinel.goal])
+        np.testing.assert_array_equal(region.locations[:, 0], [1.0, 2.0, 3.0])
