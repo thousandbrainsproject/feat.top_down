@@ -24,6 +24,7 @@ from tbp.monty.frameworks.models.salience.strategies.vocus2.pyramids import Pyra
 from tbp.monty.frameworks.models.salience.strategies.vocus2.vocus2 import (
     ColorChannelSalience,
     DepthSalience,
+    NoOperatingLimits,
     OrientationSalience,
     SafeOperatingLimits,
     Vocus2,
@@ -562,6 +563,7 @@ class Vocus2FromConfigTest(unittest.TestCase):
             surround_sigma=sentinel.surround_sigma,
             n_scales=sentinel.n_scales,
             max_octaves=sentinel.max_octaves,
+            operating_limits=sentinel.operating_limits,
         )
         color_channel_salience_mock.return_value = sentinel.color
         depth_salience_mock.return_value = sentinel.depth
@@ -575,12 +577,14 @@ class Vocus2FromConfigTest(unittest.TestCase):
             surround_sigma=sentinel.surround_sigma,
             n_scales=sentinel.n_scales,
             max_octaves=sentinel.max_octaves,
+            operating_limits=sentinel.operating_limits,
         )
         depth_salience_mock.assert_called_once_with(
             center_sigma=sentinel_center_sigma,
             surround_sigma=sentinel.surround_sigma,
             n_scales=sentinel.n_scales,
             max_octaves=sentinel.max_octaves,
+            operating_limits=sentinel.operating_limits,
         )
         orientation_salience_mock.assert_called_once_with(
             period=2 * sentinel_center_sigma,
@@ -716,6 +720,35 @@ class Vocus2FromConfigTest(unittest.TestCase):
             combine=sentinel.combine,
             normalize=sentinel.normalize,
         )
+
+
+class Vocus2OperatingLimitsTest(unittest.TestCase):
+    """Small sigmas on a 256x256 view finder image, as in compositional pretraining."""
+
+    def setUp(self) -> None:
+        rng = np.random.default_rng(0)
+        self.rgba = rng.integers(0, 256, size=(256, 256, 4), dtype=np.uint8)
+        self.depth = rng.uniform(0.1, 1.0, size=(256, 256))
+        self.ctx = Mock(suppress_runtime_errors=False)
+        self.config = dict(
+            center_sigma=1.0, surround_sigma=3.0, n_scales=2, max_octaves=10
+        )
+
+    def test_no_operating_limits_runs_outside_the_safe_limits(self) -> None:
+        vocus2 = Vocus2.from_config(
+            Vocus2SalienceConfig(**self.config, operating_limits=NoOperatingLimits())
+        )
+
+        salience = vocus2(self.ctx, self.rgba, self.depth)
+
+        self.assertEqual(salience.shape, (256, 256))
+        self.assertFalse(np.isnan(salience).any())
+
+    def test_default_config_uses_the_safe_operating_limits(self) -> None:
+        vocus2 = Vocus2.from_config(Vocus2SalienceConfig(**self.config))
+
+        with self.assertRaises(ValueError):
+            vocus2(self.ctx, self.rgba, self.depth)
 
 
 class Vocus2Test(unittest.TestCase):
