@@ -29,7 +29,7 @@ from tbp.monty.frameworks.models.object_model import GridObjectModel
 from tbp.monty.frameworks.utils.spatial_arithmetics import (
     apply_rf_transform_to_points,
 )
-from tbp.monty.geometry import Rotation
+from tbp.monty.geometry import Rotation, SurfacePoseVectors
 from tbp.monty.math import DEFAULT_TOLERANCE
 from tests import HYDRA_ROOT
 from tests.unit.resources.unit_test_utils import BaseGraphTest
@@ -761,8 +761,8 @@ class EvidenceLMTest(BaseGraphTest):
     def test_different_pose_features_not_recognized_elm(self):
         """Test that the object is not recognized if pose features don't match."""
         fake_obs_test = copy.deepcopy(self.fake_obs_learn)
-        fake_obs_test[0].morphological_features["pose_vectors"] = np.array(
-            [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
+        fake_obs_test[0].morphological_features["pose_vectors"] = SurfacePoseVectors(
+            np.array([[1, 0, 0], [0, 1, 0], [0, 0, 1]])
         )
 
         graph_lm = self.get_elm_with_fake_object(self.fake_obs_learn)
