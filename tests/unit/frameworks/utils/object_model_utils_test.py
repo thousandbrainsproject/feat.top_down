@@ -84,6 +84,29 @@ class PoseVectorsTest(unittest.TestCase):
                 pv_mean, "Mean of spread observations is not a rotation"
             )
 
+    def test_pose_vector_mean_of_aligned_normals_is_the_shared_normal(self) -> None:
+        pv_mean, use_cds = pose_vector_mean(
+            np.array([self.frame, self.frame]), np.ones((2, 1))
+        )
+        np.testing.assert_allclose(pv_mean[:3], self.normal, atol=DEFAULT_TOLERANCE)
+        self.assertTrue(use_cds)
+
+    def test_pose_vector_mean_of_cancelling_normals_falls_back_to_the_first_normal(
+        self,
+    ) -> None:
+        # Parallel curvature directions keep the half-sphere test from separating
+        # the two opposite normals, so both are averaged and their mean is zero.
+        pose_vecs = np.array(
+            [
+                np.hstack([self.normal, self.cd1, self.cd1]),
+                np.hstack([-self.normal, self.cd1, self.cd1]),
+            ]
+        )
+        pv_mean, use_cds = pose_vector_mean(pose_vecs, np.zeros((2, 1)))
+        self.assertFalse(np.any(np.isnan(pv_mean)))
+        np.testing.assert_allclose(pv_mean[:3], self.normal, atol=DEFAULT_TOLERANCE)
+        self.assertFalse(use_cds)
+
     def test_pose_vector_merge_of_opposite_curvature_directions_is_a_rotation(
         self,
     ) -> None:
