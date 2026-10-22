@@ -1170,3 +1170,62 @@ def top_down_message(
         sender_id="learning_module_2",
         sender_type="LM",
     )
+
+
+class EvidenceLMOutputGateTest(BaseGraphTest):
+    LEARNED_GRAPH_ID = "new_object0"
+    MAX_MODEL_DISTANCE = 0.01
+
+    def elm_matched(self) -> EvidenceGraphLM:
+        """Learn the fake object, then match it over the same observations.
+
+        Returns:
+            The learning module, on the object and in a "match" terminal state.
+        """
+        graph_lm = elm_with_fake_object(self.ctx, copy.deepcopy(self.fake_obs_learn))
+        graph_lm.mode = ExperimentMode.EVAL
+        graph_lm.reset_stm()
+        graph_lm.fixme_reset_ground_truth(primary_target=self.placeholder_target)
+        for observation in copy.deepcopy(self.fake_obs_learn):
+            graph_lm.add_lm_processing_to_buffer_stats(lm_processed=True)
+            graph_lm.matching_step(self.ctx, [observation])
+        graph_lm.terminal_state = "match"
+        return graph_lm
+
+    def move_mlh_to(
+        self, graph_lm: EvidenceGraphLM, location: npt.NDArray[np.float64]
+    ) -> None:
+        mlh = graph_lm._get_current_mlh()
+        graph_lm._hypotheses[mlh["graph_id"]].locations[mlh["mlh_id"]] = location
+
+    def test_default_parameters_pass_a_match_on_the_object(self) -> None:
+        graph_lm = self.elm_matched()
+        self.move_mlh_to(graph_lm, np.array([100.0, 100.0, 100.0]))
+
+        self.assertTrue(graph_lm.buffer.get_currently_on_object())
+        self.assertTrue(graph_lm.get_output().pass_message)
+
+    def test_evidence_below_the_floor_withholds_output(self) -> None:
+        graph_lm = self.elm_matched()
+        graph_lm.output_min_evidence = graph_lm._get_current_mlh()["evidence"] + 1
+
+        self.assertFalse(graph_lm.get_output().pass_message)
+
+    def test_mlh_away_from_every_node_withholds_output(self) -> None:
+        graph_lm = self.elm_matched()
+        graph_lm.output_max_model_distance = self.MAX_MODEL_DISTANCE
+        nodes = graph_lm.graph_memory.get_graph(self.LEARNED_GRAPH_ID, "patch").pos
+        farthest_x = nodes[np.argmax(nodes[:, 0])]
+        self.move_mlh_to(
+            graph_lm, farthest_x + np.array([2 * self.MAX_MODEL_DISTANCE, 0.0, 0.0])
+        )
+
+        self.assertFalse(graph_lm.get_output().pass_message)
+
+    def test_mlh_on_a_node_passes_output(self) -> None:
+        graph_lm = self.elm_matched()
+        graph_lm.output_max_model_distance = self.MAX_MODEL_DISTANCE
+        nodes = graph_lm.graph_memory.get_graph(self.LEARNED_GRAPH_ID, "patch").pos
+        self.move_mlh_to(graph_lm, nodes[0])
+
+        self.assertTrue(graph_lm.get_output().pass_message)
