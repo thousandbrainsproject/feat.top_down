@@ -45,6 +45,10 @@ class Connectivity:
     _senders: dict[Connection, list[list[int]]]
     """Stores the senders to receiving LMs by connection type"""
 
+    _bottom_up_order: list[int]
+    """The index of every learning module, each appearing exactly once. A learning
+    module that sends bottom-up to another appears before it."""
+
     def __init__(
         self,
         lm_to_lm_matrix: Sequence[Sequence[int]] | None,
@@ -60,6 +64,7 @@ class Connectivity:
         Raises:
             ValueError: If the lengths of `learning_modules` and `lm_to_lm_matrix`
                 do not match.
+            ValueError: If the bottom-up connections form a cycle.
         """
         if lm_to_lm_matrix is None:
             lm_to_lm_matrix = [[] for _ in learning_modules]
@@ -80,9 +85,12 @@ class Connectivity:
                 else:
                     self._senders[Connection.TOP_DOWN][receiver].append(sender)
 
-        # TODO: Reject bottom-up connections that form a cycle of any length, e.g.
-        # LM0 -> LM1 -> LM2 -> LM0. Until then configs must define a valid
-        # heterarchy connectivity
+        self._bottom_up_order = self._order_bottom_up()
+
+    @property
+    def bottom_up_order(self) -> Sequence[int]:
+        """The learning module indices in stepping order."""
+        return self._bottom_up_order
 
     def senders_to(self, receiver: int, connection: Connection) -> Sequence[int]:
         """The learning modules whose outputs reach a receiver over a connection.
@@ -95,3 +103,31 @@ class Connectivity:
             Indices of the sending learning modules.
         """
         return self._senders[connection][receiver]
+
+    def _order_bottom_up(self) -> list[int]:
+        """Order the learning modules so every bottom-up sender precedes its receivers.
+
+        Returns:
+            The index of every learning module, each appearing exactly once. A
+            learning module that sends bottom-up to another appears before it.
+
+        Raises:
+            ValueError: If the bottom-up connections form a cycle.
+        """
+        senders = self._senders[Connection.BOTTOM_UP]
+        remaining = list(range(len(senders)))
+        order: list[int] = []
+        while remaining:
+            # Each pass finds the LMs that can step now. An LM is ready when every one
+            # of its bottom-up senders is already in order.
+            ready = [lm for lm in remaining if all(s in order for s in senders[lm])]
+            if not ready:
+                # If some LMs are left but none is ready, each one is waiting on another
+                # LM. That only happens with a cycle, so we raise a cycle error.
+                raise ValueError(
+                    f"Bottom-up connections between learning modules {remaining} "
+                    "form a cycle"
+                )
+            order.extend(ready)
+            remaining = [lm for lm in remaining if lm not in ready]
+        return order

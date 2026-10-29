@@ -45,6 +45,11 @@ class MontyBase(Monty):
     _connectivity: Connectivity
     """The senders to each learning module, classified by connection."""
 
+    learning_module_outputs: list[Message | None]
+    """Each learning module's output in the current step, filled in as the
+    modules step in bottom-up order. `None` for a module that has not stepped
+    in this step."""
+
     _is_done: bool
 
     def __init__(
@@ -210,14 +215,7 @@ class MontyBase(Monty):
             sensor_module.update_state(agent_state)
             sm_output = sensor_module.step(ctx, raw_obs, self.is_motor_only_step)
             sensor_module_outputs.append(sm_output)
-        # Aggregate LM outputs here to be input to higher level LM at next step
-        learning_module_outputs = []
-        for learning_module in self.learning_modules:
-            lm_out = learning_module.get_output()
-            learning_module_outputs.append(lm_out)
         self.sensor_module_outputs = sensor_module_outputs
-        # TODO: Maybe combine the two?
-        self.learning_module_outputs = learning_module_outputs
 
     def motor_only_step(
         self,
@@ -244,10 +242,13 @@ class MontyBase(Monty):
         """Call any functions and logging in case of a time out."""
         pass
 
-    def _step_learning_modules(self, ctx: RuntimeContext):
-        for i in range(len(self.learning_modules)):
+    def _step_learning_modules(self, ctx: RuntimeContext) -> None:
+        self.learning_module_outputs = [None] * len(self.learning_modules)
+        for i in self._connectivity.bottom_up_order:
+            learning_module = self.learning_modules[i]
             sensory_inputs = self._collect_inputs_to_lm(i)
-            getattr(self.learning_modules[i], self.step_type)(ctx, sensory_inputs)
+            getattr(learning_module, self.step_type)(ctx, sensory_inputs)
+            self.learning_module_outputs[i] = learning_module.get_output()
 
     def _collect_inputs_to_lm(self, lm_id: int) -> list[Message]:
         """Collect the percepts to LM i from its sensor modules and learning modules.
@@ -264,6 +265,7 @@ class MontyBase(Monty):
         sensory_inputs_from_lms = [
             self.learning_module_outputs[j]
             for j in self._connectivity.senders_to(lm_id, Connection.BOTTOM_UP)
+            if self.learning_module_outputs[j] is not None
         ]
         # Combine sensory inputs from SMs and LMs to LM i
         return self._combine_inputs(sensory_inputs_from_sms, sensory_inputs_from_lms)
