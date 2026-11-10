@@ -10,15 +10,18 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Collection, Sequence
+from collections.abc import Collection, Sequence
+from typing import Any
 
 import numpy as np
+import numpy.typing as npt
 import torch
 
 from tbp.monty import telemetry
-from tbp.monty.cmp import Goal, Message, location_mean
+from tbp.monty.cmp import AttentionRegion, Goal, Message, location_mean
 from tbp.monty.context import RuntimeContext
 from tbp.monty.experiment.match_criteria import MatchCriterion
+from tbp.monty.experiment.primary_target import PrimaryTarget
 from tbp.monty.experiment.recognition_status import (
     RecognitionConclusion,
     RecognitionStatus,
@@ -34,6 +37,9 @@ from tbp.monty.frameworks.models.connectivity import Connection
 from tbp.monty.frameworks.models.goal_generation import GraphGoalGenerator
 from tbp.monty.frameworks.models.monty_base import MontyBase
 from tbp.monty.frameworks.models.object_model import GraphObjectModel
+from tbp.monty.frameworks.utils.spatial_arithmetics import (
+    apply_rf_transform_to_points,
+)
 from tbp.monty.geometry import Rotation
 from tbp.monty.memento import Memento
 from tbp.monty.runtime import is_location_only_step
@@ -56,7 +62,7 @@ class MontyForGraphMatching(MontyBase):
 
     def fixme_set_ground_truth(
         self,
-        primary_target: dict[str, Any] | None = None,
+        primary_target: PrimaryTarget | None = None,
         semantic_id_to_label: dict[SemanticID, str] | None = None,
     ) -> None:
         self.primary_target = primary_target
@@ -434,8 +440,6 @@ class MontyForGraphMatching(MontyBase):
 
                     if self.experiment_mode is ExperimentMode.TRAIN:
                         self.switch_to_exploratory_step()
-                        for sm in self.sensor_modules:
-                            sm.is_exploring = True
 
                     elif (
                         self.experiment_mode is ExperimentMode.EVAL
@@ -521,8 +525,11 @@ class MontyForGraphMatching(MontyBase):
 class GraphLM(LearningModule):
     """General Learning Module that contains a graph memory."""
 
+    _goals: list[Goal]
+    """Cache of goals for ``propose_region`` to reference."""
     possible_paths: dict[str, Any]
     detected_rotation_r: Rotation | None
+    primary_target: str | None
 
     def __init__(self, initialize_base_modules=True) -> None:
         """Initialize general Learning Module based on graphs.
@@ -561,6 +568,7 @@ class GraphLM(LearningModule):
         self._init_GraphLM()
 
     def _init_GraphLM(self) -> None:  # noqa: N802
+        self._goals = []
         self.terminal_state = None
         self.detected_object = None
         self.detected_pose = [None for _ in range(7)]
@@ -582,8 +590,7 @@ class GraphLM(LearningModule):
 
     def fixme_reset_ground_truth(
         self,
-        # TODO: Create a specific type for `primary_target`.
-        primary_target: dict[str, Any] | None = None,
+        primary_target: PrimaryTarget | None = None,
     ) -> None:
         """Set target object var and reset others from last episode.
 
@@ -596,8 +603,8 @@ class GraphLM(LearningModule):
                 primary_target)
         """
         if primary_target is not None:
-            self.primary_target = primary_target["object"]
-            self.primary_target_rotation_quat = primary_target["quat_rotation"]
+            self.primary_target = primary_target.object_name
+            self.primary_target_rotation_quat = primary_target.quat_rotation
         self.stepwise_target_object = None
         self.stepwise_targets_list = []
 
@@ -724,9 +731,20 @@ class GraphLM(LearningModule):
         Only returned if the LM/GSG was stepped, otherwise returns empty list.
         """
         if self.buffer.get_last_obs_processed() and self.gsg is not None:
-            return self.gsg.output_goals()
+            self._goals = self.gsg.output_goals()
+        else:
+            self._goals = []
 
-        return []
+        return self._goals
+
+    def propose_region(self) -> AttentionRegion:
+        """Returns attention region that ensures proposed goals can be attended to."""
+        if self._goals:
+            return AttentionRegion.uniform(
+                locations=np.array([goal.location for goal in self._goals]),
+                weight=AttentionRegion.MAX_WEIGHT,
+            )
+        return AttentionRegion.empty()
 
     def update_terminal_condition(self):
         """Check if we have reached a terminal condition for this episode.
@@ -1024,6 +1042,9 @@ class GraphLM(LearningModule):
 
     def _update_memory(self):
         """Give all infos to graph_memory.update_memory to determine how to update."""
+        if self.detected_object is None:
+            logger.info("no match found in time, not updating memory")
+            return
         args = self.buffer.get_infos_for_graph_update()
         args["graph_id"] = self.detected_object
         args["object_rotation"] = self.detected_rotation_r
@@ -1166,50 +1187,86 @@ class GraphMemory(LMMemory):
 
     def update_memory(
         self,
-        locations,
-        features,
-        graph_id,
-        object_location_rel_body,
-        location_rel_model,
-        object_rotation,
-    ):
-        """Determine how to update memory and call corresponding function."""
-        if graph_id is None:
-            logger.info("no match found in time, not updating memory")
+        locations: npt.NDArray,
+        features: dict[str, dict[str, npt.NDArray]],
+        graph_id: str,
+        object_location_rel_body: npt.NDArray,
+        location_rel_model: npt.NDArray,
+        object_rotation: Rotation | None,
+    ) -> None:
+        """Determine how to update memory and call corresponding function.
+
+        How each channel's data is handled falls into one of three cases:
+
+        1. Unknown object: Points are stored as-is (i.e., untransformed) for all
+           channels.
+        2. Known object, known channel: Adds the points via ``_extend_graph``. Note
+           that the points will be transformed into the model's reference frame before
+           storage, but it is not this method's responsibility.
+        3. Known object, unknown channel: Transforms the points into this model's
+           reference frame (if `object_rotation` is not None). It then builds the new
+           graph.
+
+        """
+        # Determine this before the loop: channels added by this call must not
+        # make the object look like it was already in memory (and thus has a
+        # reference frame to transform into) for channels later in the loop.
+        object_known = graph_id in self.get_memory_ids()
+        if object_known:
+            logger.info(f"{graph_id} already in memory ({self.get_memory_ids()})")
         else:
-            for input_channel in features:
-                (
-                    input_channel_features,
+            logger.info(f"{graph_id} not in memory ({self.get_memory_ids()})")
+
+        for input_channel, channel_features in features.items():
+            (
+                input_channel_features,
+                input_channel_locations,
+            ) = self._extract_entries_with_content(channel_features, locations)
+
+            if not object_known:
+                # Case 1: unknown object.
+                self._build_graph(
                     input_channel_locations,
-                ) = self._extract_entries_with_content(
-                    features[input_channel], locations
+                    input_channel_features,
+                    graph_id,
+                    input_channel,
                 )
-                # Update graph
-                if (
-                    graph_id in self.get_memory_ids()
-                    and input_channel in self.get_input_channels_in_graph(graph_id)
-                ):
-                    logger.info(
-                        f"{graph_id} already in memory ({self.get_memory_ids()})"
-                    )
-                    self._extend_graph(
-                        input_channel_locations,
-                        input_channel_features,
-                        graph_id,
-                        input_channel,
-                        object_location_rel_body,
-                        location_rel_model,
-                        object_rotation,
+            elif input_channel in self.get_input_channels_in_graph(graph_id):
+                # Case 2: known object, known channel.
+                self._extend_graph(
+                    input_channel_locations,
+                    input_channel_features,
+                    graph_id,
+                    input_channel,
+                    object_location_rel_body,
+                    location_rel_model,
+                    object_rotation,
+                )
+            else:
+                # Case 3: known object, unknown channel.
+                if object_rotation is None:
+                    logger.warning(
+                        f"No object rotation for {graph_id}; adding new channel "
+                        f"{input_channel} without transforming it into the "
+                        "object's reference frame."
                     )
                 else:
-                    logger.info(f"{graph_id} not in memory ({self.get_memory_ids()})")
-                    print(f"building graph for {input_channel}")
-                    self._build_graph(
+                    (
                         input_channel_locations,
                         input_channel_features,
-                        graph_id,
-                        input_channel,
+                    ) = apply_rf_transform_to_points(
+                        locations=input_channel_locations,
+                        features=input_channel_features,
+                        location_rel_model=location_rel_model,
+                        object_location_rel_body=object_location_rel_body,
+                        object_rotation=object_rotation,
                     )
+                self._build_graph(
+                    input_channel_locations,
+                    input_channel_features,
+                    graph_id,
+                    input_channel,
+                )
 
     def initialize_feature_arrays(self):
         for graph_id in self.get_memory_ids():
