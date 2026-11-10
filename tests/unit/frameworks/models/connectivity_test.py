@@ -98,3 +98,45 @@ class ConnectivityTest(unittest.TestCase):
 
         self.assertEqual(connectivity.senders_to(0, Connection.TOP_DOWN), [2])
         self.assertEqual(connectivity.senders_to(2, Connection.BOTTOM_UP), [0])
+
+    def test_bottom_up_order_is_index_order_without_bottom_up_connections(
+        self,
+    ) -> None:
+        learning_modules = build_learning_modules([[], [], []])
+
+        top_down_only = Connectivity([[2], [2], []], learning_modules)
+        unconnected = Connectivity(None, learning_modules)
+
+        self.assertEqual(top_down_only.bottom_up_order, [0, 1, 2])
+        self.assertEqual(unconnected.bottom_up_order, [0, 1, 2])
+
+    def test_bottom_up_order_steps_every_sender_before_its_receiver(self) -> None:
+        learning_modules = build_learning_modules(
+            [["learning_module_1", "learning_module_2"], [], []]
+        )
+
+        connectivity = Connectivity([[1, 2], [], []], learning_modules)
+
+        self.assertEqual(connectivity.bottom_up_order, [1, 2, 0])
+
+    def test_bottom_up_order_follows_a_chain_of_senders(self) -> None:
+        learning_modules = build_learning_modules(
+            [["learning_module_1"], ["learning_module_2"], []]
+        )
+
+        connectivity = Connectivity([[1], [2], []], learning_modules)
+
+        self.assertEqual(connectivity.bottom_up_order, [2, 1, 0])
+
+    def test_init_raises_value_error_when_bottom_up_connections_form_a_cycle(
+        self,
+    ) -> None:
+        learning_modules = build_learning_modules(
+            [["learning_module_1"], ["learning_module_0"]]
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"Bottom-up connections between learning modules \[0, 1\] form a cycle",
+        ):
+            Connectivity([[1], [0]], learning_modules)

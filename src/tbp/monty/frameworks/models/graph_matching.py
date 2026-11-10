@@ -214,9 +214,10 @@ class MontyForGraphMatching(MontyBase):
     # ======================= Private ==========================
     # ------------------- Main Algorithm -----------------------
 
-    def _step_learning_modules(self, ctx: RuntimeContext):
+    def _step_learning_modules(self, ctx: RuntimeContext) -> None:
         """Collect inputs and step each learning module."""
-        for i in range(len(self.learning_modules)):
+        self.learning_module_outputs = [None] * len(self.learning_modules)
+        for i in self._connectivity.bottom_up_order:
             sensory_inputs = self._collect_inputs_to_lm(i)
             # If LM has any inputs, take a step
             if sensory_inputs:
@@ -231,6 +232,7 @@ class MontyForGraphMatching(MontyBase):
                 lm_step_method = getattr(self.learning_modules[i], self.step_type)
                 assert callable(lm_step_method), f"{lm_step_method} must be callable"
                 lm_step_method(ctx, sensory_inputs)
+                self.learning_module_outputs[i] = self.learning_modules[i].get_output()
                 if self.step_type == "matching_step":
                     logger.debug(f"Stepping learning module {i}")
 

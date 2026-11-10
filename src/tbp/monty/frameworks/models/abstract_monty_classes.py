@@ -195,10 +195,10 @@ class Monty(ExperimentMonty, RuntimeMonty, Snapshotable, metaclass=abc.ABCMeta):
         pass
 
     @abc.abstractmethod
-    def _step_learning_modules(self, ctx: RuntimeContext):
+    def _step_learning_modules(self, ctx: RuntimeContext) -> None:
         """Pass data from SMs to LMs, and have each LM take a step.
 
-        LM step type depends on self.step_type.
+        LMs step in bottom-up order and the LM step type depends on self.step_type.
         """
         pass
 
