@@ -29,7 +29,7 @@ from tbp.monty.frameworks.models.object_model import GridObjectModel
 from tbp.monty.frameworks.utils.spatial_arithmetics import (
     apply_rf_transform_to_points,
 )
-from tbp.monty.geometry import Rotation, SurfacePoseVectors
+from tbp.monty.geometry import OrientationMatrix, Rotation, SurfacePoseVectors
 from tbp.monty.math import DEFAULT_TOLERANCE
 from tests import HYDRA_ROOT
 from tests.unit.resources.unit_test_utils import BaseGraphTest
@@ -1008,7 +1008,7 @@ class EvidenceLMTopDownTest(BaseGraphTest):
         messages = graph_lm.send_top_down(self.CHILD_CHANNEL)
 
         np.testing.assert_allclose(
-            messages[0].morphological_features["pose_vectors"],
+            messages[0].morphological_features["pose_vectors"].value,
             child_pose.as_matrix(),
             rtol=0,
             atol=DEFAULT_TOLERANCE,
@@ -1073,7 +1073,7 @@ class EvidenceLMTopDownTest(BaseGraphTest):
         )
         np.testing.assert_allclose(
             graph_lm.current_mlh["rotation"].as_matrix(),
-            pose,
+            pose.value,
             rtol=0,
             atol=DEFAULT_TOLERANCE,
             err_msg="The created hypothesis should have the target pose.",
@@ -1090,8 +1090,8 @@ class EvidenceLMTopDownTest(BaseGraphTest):
         graph_lm = self.elm_after_matching(self.DOMINANT_TOP_DOWN_WEIGHT)
         output = graph_lm.get_output()
         location = output.non_morphological_features["location_rel_model"]
-        pose = (
-            output.morphological_features["pose_vectors"]
+        pose = OrientationMatrix(
+            output.morphological_features["pose_vectors"].value
             @ Rotation.from_euler(
                 "z", graph_lm.pose_similarity_threshold + 0.1
             ).as_matrix()
@@ -1115,7 +1115,7 @@ class EvidenceLMTopDownTest(BaseGraphTest):
         )
         np.testing.assert_allclose(
             graph_lm.current_mlh["rotation"].as_matrix(),
-            pose,
+            pose.value,
             rtol=0,
             atol=DEFAULT_TOLERANCE,
             err_msg="The created hypothesis should have the target pose.",
@@ -1153,7 +1153,7 @@ class EvidenceLMTopDownTest(BaseGraphTest):
 
 def top_down_message(
     location: npt.NDArray[np.float64],
-    pose_vectors: npt.NDArray[np.float64],
+    pose_vectors: OrientationMatrix,
     object_id: int,
     confidence: float,
 ) -> Message:
