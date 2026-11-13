@@ -1,0 +1,17 @@
+# @package experiment.config
+
+# The episode continues after learning_module_2 matches, until all three
+# learning modules match or the step cap is reached. Two things still end it
+# early or mark it: every learning module reaching no_match ends the episode,
+# and learning modules still undecided at the step cap are set to time_out.
+match_criterion:
+  _target_: tbp.monty.experiment.match_criteria.NamedLMsMatch
+  ids:
+    - learning_module_0
+    - learning_module_1
+    - learning_module_2
+recognition_strategy:
+  _target_: tbp.monty.experiment.recognition_strategy.ObjectRecognition
+  max_train_steps: 1000
+  max_eval_steps: 500
+  max_total_steps: 6000
